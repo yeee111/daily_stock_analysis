@@ -24,6 +24,7 @@ from api.v1.endpoints import (
     history,
     intelligence,
     portfolio,
+    smart_scan,
     stocks,
     system_config,
     usage,
@@ -103,6 +104,12 @@ router.include_router(
     screening.router,
     prefix="/screening",
     tags=["Screening"]
+)
+
+router.include_router(
+    smart_scan.router,
+    prefix="/smart-scan",
+    tags=["SmartScan"]
 )
 
 router.include_router(
