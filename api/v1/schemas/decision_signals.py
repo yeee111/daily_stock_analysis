@@ -13,7 +13,7 @@ from src.schemas.decision_action import DecisionAction
 from src.schemas.decision_profile import DecisionProfile
 
 
-DecisionSignalSourceType = Literal["analysis", "agent", "alert", "market_review", "manual"]
+DecisionSignalSourceType = Literal["analysis", "agent", "alert", "market_review", "manual", "screening"]
 DecisionSignalStatus = Literal["active", "expired", "invalidated", "closed", "archived"]
 DecisionSignalPlanQuality = Literal["complete", "partial", "minimal", "unknown"]
 DecisionSignalHorizon = Literal["intraday", "1d", "3d", "5d", "10d", "swing", "long"]

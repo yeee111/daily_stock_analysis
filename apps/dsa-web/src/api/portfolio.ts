@@ -13,10 +13,12 @@ import type {
   PortfolioDeleteResponse,
   PortfolioEventCreatedResponse,
   PortfolioFxRefreshResponse,
+  PortfolioMarketDataRefreshResponse,
   PortfolioImportBrokerListResponse,
   PortfolioImportCommitResponse,
   PortfolioImportParseResponse,
   PortfolioPositionAnalysisRequest,
+  PortfolioPerformanceResponse,
   PortfolioRiskResponse,
   PortfolioSnapshotResponse,
   PortfolioTradeCreateRequest,
@@ -153,6 +155,22 @@ export const portfolioApi = {
       params: buildSnapshotParams(query),
     });
     return toCamelCase<PortfolioRiskResponse>(response.data);
+  },
+
+  async getPerformance(query: SnapshotQuery = {}): Promise<PortfolioPerformanceResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/portfolio/performance', {
+      params: buildSnapshotParams(query),
+    });
+    return toCamelCase<PortfolioPerformanceResponse>(response.data);
+  },
+
+  async refreshMarketData(query: SnapshotQuery = {}): Promise<PortfolioMarketDataRefreshResponse> {
+    const response = await apiClient.post<Record<string, unknown>>(
+      '/api/v1/portfolio/market-data/refresh',
+      undefined,
+      { params: buildSnapshotParams(query) },
+    );
+    return toCamelCase<PortfolioMarketDataRefreshResponse>(response.data);
   },
 
   async refreshFx(query: FxRefreshQuery = {}): Promise<PortfolioFxRefreshResponse> {

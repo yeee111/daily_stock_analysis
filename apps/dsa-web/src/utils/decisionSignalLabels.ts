@@ -51,6 +51,7 @@ const SOURCE_TYPE_LABEL_KEYS: Record<DecisionSignalSourceType, UiTextKey> = {
   alert: 'decisionSignals.sourceType.alert',
   market_review: 'decisionSignals.sourceType.market_review',
   manual: 'decisionSignals.sourceType.manual',
+  screening: 'decisionSignals.sourceType.screening',
 };
 
 function translatedKnownValue<Value extends string>(

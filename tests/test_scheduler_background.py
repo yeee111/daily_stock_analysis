@@ -334,5 +334,90 @@ class SchedulerBackgroundTaskTestCase(unittest.TestCase):
         self.assertEqual(fake_schedule.jobs, [])
 
 
+class SchedulerIndependentDailyTaskTestCase(unittest.TestCase):
+    """Paper trading needs its own daily trigger, not the analysis one."""
+
+    def test_extra_daily_task_registers_its_own_jobs(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            scheduler.set_daily_task(lambda: None, run_immediately=False)
+            scheduler.add_daily_task(
+                lambda: None,
+                schedule_times=["19:00", "18:05"],
+                name="paper_trading",
+            )
+
+        self.assertEqual(len(fake_schedule.jobs), 3)
+        times = [job.at_time for job in scheduler._extra_daily_tasks[0]["jobs"]]
+        self.assertEqual(times, ["18:05", "19:00"])
+
+    def test_extra_daily_task_runs_when_main_task_does_not(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            calls = []
+            scheduler.set_daily_task(lambda: calls.append("main"), run_immediately=False)
+            scheduler.add_daily_task(
+                lambda: calls.append("paper"),
+                schedule_times=["18:05"],
+                name="paper_trading",
+            )
+
+            scheduler._extra_daily_tasks[0]["jobs"][0].job_func()
+
+        self.assertEqual(calls, ["paper"])
+
+    def test_extra_daily_task_refreshes_times_from_provider(self):
+        fake_schedule = _FakeScheduleModule()
+        latest = ["18:05"]
+
+        def provider():
+            return list(latest)
+
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            scheduler.set_daily_task(lambda: None, run_immediately=False)
+            scheduler.add_daily_task(
+                lambda: None,
+                schedule_times_provider=provider,
+                name="paper_trading",
+            )
+            latest[:] = ["09:30"]
+
+            scheduler._refresh_extra_daily_tasks_if_needed()
+            scheduler._refresh_extra_daily_tasks_if_needed()
+
+        times = [job.at_time for job in scheduler._extra_daily_tasks[0]["jobs"]]
+        self.assertEqual(times, ["09:30"])
+        self.assertEqual(
+            [job.at_time for job in fake_schedule.jobs],
+            ["18:00", "09:30"],
+        )
+
+    def test_stop_cancels_extra_daily_jobs(self):
+        fake_schedule = _FakeScheduleModule()
+        with patch.dict(sys.modules, {"schedule": fake_schedule}):
+            from src.scheduler import Scheduler
+
+            scheduler = Scheduler(schedule_time="18:00")
+            scheduler.set_daily_task(lambda: None, run_immediately=False)
+            scheduler.add_daily_task(
+                lambda: None,
+                schedule_times=["18:05", "19:00"],
+                name="paper_trading",
+            )
+
+            scheduler.stop()
+
+        self.assertEqual(fake_schedule.jobs, [])
+
+
 if __name__ == "__main__":
     unittest.main()

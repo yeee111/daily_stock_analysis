@@ -29,7 +29,9 @@ from api.v1.schemas.portfolio import (
     PortfolioImportCommitResponse,
     PortfolioImportParseResponse,
     PortfolioImportTradeItem,
+    PortfolioMarketDataRefreshResponse,
     PortfolioPositionAnalysisRequest,
+    PortfolioPerformanceResponse,
     PortfolioRiskResponse,
     PortfolioSnapshotResponse,
     PortfolioTradeListResponse,
@@ -37,6 +39,7 @@ from api.v1.schemas.portfolio import (
 )
 from src.services.task_queue import get_task_queue
 from src.services.portfolio_import_service import PortfolioImportService
+from src.services.portfolio_performance_service import PortfolioPerformanceService
 from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import (
     PortfolioBusyError,
@@ -674,3 +677,53 @@ def get_risk_report(
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("Get risk report failed", exc)
+
+
+@router.get(
+    "/performance",
+    response_model=PortfolioPerformanceResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Get portfolio performance report",
+)
+def get_performance_report(
+    account_id: Optional[int] = Query(None, description="Optional account id"),
+    as_of: Optional[date] = Query(None, description="Performance report date, default today"),
+    cost_method: str = Query("fifo", description="Cost method: fifo or avg"),
+    include_realtime: bool = Query(
+        True,
+        description="Whether today's snapshot should try realtime quotes before historical close fallback",
+    ),
+) -> PortfolioPerformanceResponse:
+    service = PortfolioPerformanceService()
+    try:
+        data = service.get_performance_report(
+            account_id=account_id,
+            as_of=as_of,
+            cost_method=cost_method,
+            include_realtime=include_realtime,
+        )
+        return PortfolioPerformanceResponse(**data)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Get performance report failed", exc)
+
+
+@router.post(
+    "/market-data/refresh",
+    response_model=PortfolioMarketDataRefreshResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Refresh benchmark index bars and backfill holdings without local prices",
+)
+def refresh_market_data(
+    account_id: Optional[int] = Query(None, description="Optional account id"),
+    as_of: Optional[date] = Query(None, description="Reference date, default today"),
+) -> PortfolioMarketDataRefreshResponse:
+    service = PortfolioPerformanceService()
+    try:
+        data = service.refresh_market_data(account_id=account_id, as_of=as_of)
+        return PortfolioMarketDataRefreshResponse(**data)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Refresh market data failed", exc)

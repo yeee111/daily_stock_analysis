@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from data_provider.fundamental_adapter import (
     AkshareFundamentalAdapter,
+    _build_corporate_action_events,
     _build_dividend_payload,
     _extract_latest_row,
     _parse_dividend_plan_to_per_share,
@@ -169,6 +170,59 @@ class TestFundamentalAdapter(unittest.TestCase):
         payload = _build_dividend_payload(df, stock_code="600519")
         self.assertEqual(payload.get("ttm_event_count"), 1)
         self.assertAlmostEqual(payload.get("ttm_cash_dividend_per_share"), 0.3, places=6)
+
+
+class TestCorporateActionEvents(unittest.TestCase):
+    """The three AkShare dividend tables use different column layouts."""
+
+    def test_eastmoney_fhps_layout(self) -> None:
+        df = pd.DataFrame(
+            {
+                "报告期": ["2025-12-31", "2024-12-31"],
+                "送转股份-送转总比例": [3.0, None],
+                "现金分红-现金分红比例": [28.0242, 10.0],
+                "除权除息日": ["2026-06-26", "2025-06-26"],
+                "方案进度": ["实施分配", "取消分配"],
+            }
+        )
+        events = _build_corporate_action_events(df, "600519", today=datetime(2026, 11, 5))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["ex_dividend_date"], "2026-06-26")
+        self.assertAlmostEqual(events[0]["cash_dividend_per_share"], 2.80242, places=6)
+        self.assertAlmostEqual(events[0]["split_ratio"], 1.3, places=6)
+
+    def test_sina_history_layout(self) -> None:
+        df = pd.DataFrame(
+            {
+                "公告日期": ["2026-06-22"],
+                "送股": [1.0],
+                "转增": [2.0],
+                "派息": [5.0],
+                "进度": ["实施"],
+                "除权除息日": ["2026-06-26"],
+            }
+        )
+        events = _build_corporate_action_events(df, "600519", today=datetime(2026, 11, 5))
+        self.assertEqual(len(events), 1)
+        self.assertAlmostEqual(events[0]["cash_dividend_per_share"], 0.5, places=6)
+        self.assertAlmostEqual(events[0]["split_ratio"], 1.3, places=6)
+
+    def test_cninfo_layout_skips_future_and_empty_events(self) -> None:
+        df = pd.DataFrame(
+            {
+                "分红类型": ["年度分红", "年度分红"],
+                "送股比例": [None, None],
+                "转增比例": [None, None],
+                "派息比例": [None, 3.0],
+                "除权日": ["2024-07-25", "2027-07-25"],
+            }
+        )
+        self.assertEqual(_build_corporate_action_events(df, "600519", today=datetime(2026, 11, 5)), [])
+
+    def test_get_dividend_events_is_fail_open(self) -> None:
+        adapter = AkshareFundamentalAdapter()
+        with patch.object(adapter, "_call_df_candidates", side_effect=RuntimeError("boom")):
+            self.assertEqual(adapter.get_dividend_events("600519"), [])
 
 
 if __name__ == "__main__":

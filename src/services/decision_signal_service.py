@@ -45,7 +45,7 @@ from src.utils.data_processing import parse_json_field
 from src.utils.sanitize import sanitize_decision_signal_payload, sanitize_decision_signal_text
 
 
-SOURCE_TYPES = frozenset({"analysis", "agent", "alert", "market_review", "manual"})
+SOURCE_TYPES = frozenset({"analysis", "agent", "alert", "market_review", "manual", "screening"})
 SIGNAL_STATUSES = frozenset({"active", "expired", "invalidated", "closed", "archived"})
 PLAN_QUALITIES = frozenset({"complete", "partial", "minimal", "unknown"})
 HORIZONS = frozenset({"intraday", "1d", "3d", "5d", "10d", "swing", "long"})

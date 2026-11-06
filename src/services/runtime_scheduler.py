@@ -28,7 +28,35 @@ RUNTIME_SCHEDULER_SUPPRESS_START_ENV = "DSA_RUNTIME_SCHEDULER_SUPPRESS_START"
 RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
 RUNTIME_SCHEDULER_TIMEOUT_ENV = "DSA_RUNTIME_SCHEDULER_TIMEOUT_SECONDS"
 DEFAULT_RUNTIME_SCHEDULER_TIMEOUT_SECONDS = 45 * 60
+PAPER_TRADING_SCHEDULE_TIMES_ENV = "PAPER_TRADING_SCHEDULE_TIMES"
+DEFAULT_PAPER_TRADING_SCHEDULE_TIMES: Tuple[str, ...] = ("18:05", "19:00")
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
+
+# Single outcome vocabulary for one watchdog execution. The paper-trading pass
+# is triggered from the same collection point for every outcome that actually
+# touched the account's data, so a skipped/failed/timed-out analysis cannot
+# silently swallow a due batch or a resting exit.
+ANALYSIS_OUTCOME_SUCCESS = "success"
+ANALYSIS_OUTCOME_SKIPPED = "skipped"
+ANALYSIS_OUTCOME_FAILED = "failed"
+ANALYSIS_OUTCOME_TIMEOUT = "timeout"
+ANALYSIS_OUTCOME_WORKER_LOST = "worker_lost"
+ANALYSIS_OUTCOME_WATCHDOG_ERROR = "watchdog_error"
+ANALYSIS_OUTCOME_GENERATION_ABORTED = "generation_aborted"
+ANALYSIS_OUTCOME_BUSY = "busy"
+
+# Outcomes that mean "this run is the one responsible for the daily pass".
+# ``busy`` is excluded because another watchdog owns the pass, and
+# ``generation_aborted`` because a newer generation superseded this run and
+# will fire the hook itself.
+PAPER_TRADING_TRIGGER_OUTCOMES = frozenset({
+    ANALYSIS_OUTCOME_SUCCESS,
+    ANALYSIS_OUTCOME_SKIPPED,
+    ANALYSIS_OUTCOME_FAILED,
+    ANALYSIS_OUTCOME_TIMEOUT,
+    ANALYSIS_OUTCOME_WORKER_LOST,
+    ANALYSIS_OUTCOME_WATCHDOG_ERROR,
+})
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
     "no_market_review",
@@ -480,6 +508,89 @@ class RuntimeSchedulerService:
             name="runtime-timeout-partial",
         ).start()
 
+    def _run_screening_signal_bridge(self) -> None:
+        """Persist screening candidates before paper trading consumes signals."""
+        try:
+            config = self._config_provider()
+            if not getattr(config, "screening_signal_bridge_enabled", False):
+                return
+            if not getattr(config, "screening_enabled", False):
+                logger.info(
+                    "Screening signal bridge skipped: SCREENING_ENABLED is false"
+                )
+                return
+
+            from src.services.screening_service import ScreeningService
+            from src.services.screening_signal_extractor import (
+                DEFAULT_SCREENING_HORIZON,
+                SUPPORTED_SCREENING_HORIZONS,
+                persist_screening_signals,
+            )
+
+            horizon = str(getattr(config, "screening_signal_horizon", "") or "")
+            if horizon not in SUPPORTED_SCREENING_HORIZONS:
+                if horizon:
+                    logger.warning(
+                        "Unsupported SCREENING_SIGNAL_HORIZON=%r; using %s",
+                        horizon,
+                        DEFAULT_SCREENING_HORIZON,
+                    )
+                horizon = DEFAULT_SCREENING_HORIZON
+
+            max_results = int(config.screening_signal_max_results)
+            buy_top_n = min(int(config.screening_signal_buy_top_n), max_results)
+            response = ScreeningService(config).screen(
+                strategy=str(config.screening_signal_strategy),
+                market=str(config.screening_signal_market),
+                max_results=max_results,
+            )
+            summary = persist_screening_signals(
+                response,
+                buy_top_n=buy_top_n,
+                horizon=horizon,
+                trigger_source="schedule",
+            )
+            logger.info(
+                "Screening signal bridge finished: strategy=%s market=%s candidates=%s created=%s errors=%s",
+                config.screening_signal_strategy,
+                config.screening_signal_market,
+                summary.get("candidates"),
+                summary.get("created"),
+                len(summary.get("errors") or []),
+            )
+        except Exception as exc:  # noqa: BLE001 - never fail the analysis result
+            logger.exception("Screening signal bridge failed: %s", exc)
+
+    @staticmethod
+    def _run_paper_trading_after_analysis(*, outcome: str) -> None:
+        """Opt-in paper trading pass after a scheduled analysis outcome."""
+        try:
+            from src.services.paper_trading_service import maybe_run_after_analysis
+
+            maybe_run_after_analysis(trigger=f"analysis_hook:{outcome}")
+        except Exception as exc:  # noqa: BLE001 - never fail the analysis result
+            logger.exception("Paper trading auto-run failed: %s", exc)
+
+    @staticmethod
+    def _paper_trading_schedule_times() -> List[str]:
+        """Times for the independent paper-trading schedule (live env read)."""
+        raw = (os.getenv(PAPER_TRADING_SCHEDULE_TIMES_ENV) or "").strip()
+        if not raw:
+            return list(DEFAULT_PAPER_TRADING_SCHEDULE_TIMES)
+        return normalize_schedule_times(
+            raw,
+            fallback_time=DEFAULT_PAPER_TRADING_SCHEDULE_TIMES[0],
+        )
+
+    def _run_paper_trading_schedule(self) -> None:
+        """Independent daily trigger: runs even when no analysis ran today."""
+        try:
+            from src.services.paper_trading_service import maybe_run_after_analysis
+
+            maybe_run_after_analysis(trigger="paper_trading_schedule")
+        except Exception as exc:  # noqa: BLE001 - never kill the scheduler loop
+            logger.exception("Paper trading scheduled run failed: %s", exc)
+
     def _run_analysis_with_watchdog(
         self,
         stock_codes: Optional[List[str]] = None,
@@ -490,13 +601,59 @@ class RuntimeSchedulerService:
     ) -> None:
         if not lock_held and not self._run_lock.acquire(blocking=False):
             self._record_analysis_busy_skip()
+            logger.info(
+                "Runtime scheduled analysis outcome: %s (another run owns the lock)",
+                ANALYSIS_OUTCOME_BUSY,
+            )
             return
         if generation is None:
             with self._analysis_process_lock:
                 generation = self._analysis_generation
 
+        state: Dict[str, Any] = {"timeout_partial": None}
+        outcome = ANALYSIS_OUTCOME_FAILED
+        try:
+            outcome = self._execute_scheduled_analysis(
+                stock_codes,
+                generation=generation,
+                scheduled_for=scheduled_for,
+                state=state,
+            )
+        except Exception as exc:  # noqa: BLE001 - watchdog failures must release the scheduler.
+            outcome = ANALYSIS_OUTCOME_WATCHDOG_ERROR
+            with self._analysis_process_lock:
+                if generation == self._analysis_generation:
+                    self._last_error = str(exc)
+            logger.exception("Runtime scheduler watchdog failed: %s", exc)
+        finally:
+            self._run_lock.release()
+            timeout_partial = state.get("timeout_partial")
+            if timeout_partial is not None:
+                self._apply_timeout_partial_outcome(timeout_partial)
+
+        logger.info("Runtime scheduled analysis outcome: %s", outcome)
+        # Screening and paper trading hit the network and the DB; run them only
+        # after the run lock is released so status()/stop() stay responsive.
+        if outcome == ANALYSIS_OUTCOME_SUCCESS:
+            self._run_screening_signal_bridge()
+        if outcome in PAPER_TRADING_TRIGGER_OUTCOMES:
+            self._run_paper_trading_after_analysis(outcome=outcome)
+
+    def _execute_scheduled_analysis(
+        self,
+        stock_codes: Optional[List[str]],
+        *,
+        generation: int,
+        scheduled_for: Optional[datetime],
+        state: Dict[str, Any],
+    ) -> str:
+        """Run one spawn child and return a single outcome code.
+
+        All early exits are plain ``return``s of an outcome, so the caller can
+        collect the run exactly once regardless of how the child ended.
+        """
         result_queue = None
-        timeout_partial_context: Optional[Dict[str, Any]] = None
+        process = None
         try:
             context = multiprocessing.get_context("spawn")
             result_queue = context.Queue()
@@ -512,7 +669,7 @@ class RuntimeSchedulerService:
             run_started_at = datetime.now()
             with self._analysis_process_lock:
                 if generation != self._analysis_generation:
-                    return
+                    return ANALYSIS_OUTCOME_GENERATION_ABORTED
                 process.start()
                 self._analysis_process = process
                 self._last_run_at = run_started_at.isoformat()
@@ -537,68 +694,62 @@ class RuntimeSchedulerService:
                 _terminate_analysis_process_tree(process)
                 with self._analysis_process_lock:
                     if generation != self._analysis_generation:
-                        return
+                        return ANALYSIS_OUTCOME_GENERATION_ABORTED
                     # Baseline error first so status.running can clear quickly.
                     self._last_error = (
                         f"runtime scheduled analysis timed out after {timeout}s"
                     )
-                    timeout_partial_context = {
+                    state["timeout_partial"] = {
                         "timeout_seconds": timeout,
                         "run_started_at": run_started_at,
                         "stock_codes": stock_codes,
                         "generation": generation,
                     }
-                return
+                return ANALYSIS_OUTCOME_TIMEOUT
 
             if result is None:
                 exit_code = process.exitcode
                 _terminate_analysis_process_tree(process)
                 with self._analysis_process_lock:
                     if generation != self._analysis_generation:
-                        return
+                        return ANALYSIS_OUTCOME_GENERATION_ABORTED
                     self._last_error = (
                         "runtime scheduled analysis worker exited without a result "
                         f"(exit code {exit_code})"
                     )
-                return
+                return ANALYSIS_OUTCOME_WORKER_LOST
 
             process.join(2)
             if process.is_alive():
                 _terminate_analysis_process_tree(process)
                 with self._analysis_process_lock:
                     if generation != self._analysis_generation:
-                        return
+                        return ANALYSIS_OUTCOME_GENERATION_ABORTED
                     self._last_error = "runtime scheduled analysis worker did not exit"
-                return
+                return ANALYSIS_OUTCOME_WORKER_LOST
 
             with self._analysis_process_lock:
                 if generation != self._analysis_generation:
-                    return
+                    return ANALYSIS_OUTCOME_GENERATION_ABORTED
                 if result.get("skipped"):
                     self._last_skipped_at = datetime.now().isoformat()
                     self._last_skip_reason = result["skipped"]
                     self._last_error = None
-                elif result.get("success"):
+                    return ANALYSIS_OUTCOME_SKIPPED
+                if result.get("success"):
                     self._last_success_at = datetime.now().isoformat()
                     self._last_error = None
-                else:
-                    self._last_error = result.get("error") or "runtime scheduled analysis failed"
-        except Exception as exc:  # noqa: BLE001 - watchdog failures must release the scheduler.
-            with self._analysis_process_lock:
-                if generation == self._analysis_generation:
-                    self._last_error = str(exc)
-            logger.exception("Runtime scheduler watchdog failed: %s", exc)
+                    return ANALYSIS_OUTCOME_SUCCESS
+                self._last_error = result.get("error") or "runtime scheduled analysis failed"
+                return ANALYSIS_OUTCOME_FAILED
         finally:
-            self._run_lock.release()
-            if "process" in locals():
+            if process is not None:
                 with self._analysis_process_lock:
                     if self._analysis_process is process:
                         self._analysis_process = None
             if result_queue is not None:
                 result_queue.cancel_join_thread()
                 result_queue.close()
-            if timeout_partial_context is not None:
-                self._apply_timeout_partial_outcome(timeout_partial_context)
 
     def _start_analysis_watchdog(
         self,
@@ -610,6 +761,12 @@ class RuntimeSchedulerService:
         with self._analysis_process_lock:
             current_generation = self._analysis_generation
             if generation is not None and generation != current_generation:
+                logger.info(
+                    "Runtime scheduled analysis outcome: %s (generation %s -> %s)",
+                    ANALYSIS_OUTCOME_GENERATION_ABORTED,
+                    generation,
+                    current_generation,
+                )
                 return False
             generation = current_generation
         if not self._run_lock.acquire(blocking=False):
@@ -737,6 +894,15 @@ class RuntimeSchedulerService:
                     run_immediately=entry.get("run_immediately", False),
                     name=entry.get("name"),
                 )
+            # Independent of the analysis schedule: paper trading still runs
+            # when today's analysis never started, was skipped, or failed.
+            scheduler.add_daily_task(
+                self._run_paper_trading_schedule,
+                schedule_times=self._paper_trading_schedule_times(),
+                schedule_times_provider=self._paper_trading_schedule_times,
+                fallback_time=DEFAULT_PAPER_TRADING_SCHEDULE_TIMES[0],
+                name="paper_trading",
+            )
             if run_immediately and self._run_immediately_in_background:
                 self._run_in_background_thread(scheduled_analysis)
             thread = threading.Thread(
@@ -814,16 +980,24 @@ class RuntimeSchedulerService:
             next_run = min(job.next_run for job in jobs).isoformat()
         if scheduler is not None:
             schedule_times = list(getattr(scheduler, "schedule_times", []))
+            paper_trading_times = [
+                list(entry.get("times") or [])
+                for entry in getattr(scheduler, "_extra_daily_tasks", [])
+                if entry.get("name") == "paper_trading"
+            ]
+            paper_trading_schedule_times = paper_trading_times[0] if paper_trading_times else []
         else:
             try:
                 schedule_times = self._current_times()
             except Exception:  # pragma: no cover - defensive status fallback
                 schedule_times = []
+            paper_trading_schedule_times = []
         running = self._run_lock.locked()
         return {
             "enabled": self._enabled,
             "running": running,
             "schedule_times": schedule_times,
+            "paper_trading_schedule_times": paper_trading_schedule_times,
             "next_run_at": next_run,
             "last_run_at": self._last_run_at,
             "last_success_at": self._last_success_at,

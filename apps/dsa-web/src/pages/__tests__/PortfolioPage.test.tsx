@@ -12,6 +12,8 @@ const {
   getAccounts,
   getSnapshot,
   getRisk,
+  getPerformance,
+  refreshMarketData,
   refreshFx,
   listImportBrokers,
   listTrades,
@@ -34,6 +36,8 @@ const {
   getAccounts: vi.fn(),
   getSnapshot: vi.fn(),
   getRisk: vi.fn(),
+  getPerformance: vi.fn(),
+  refreshMarketData: vi.fn(),
   refreshFx: vi.fn(),
   listImportBrokers: vi.fn(),
   listTrades: vi.fn(),
@@ -66,6 +70,8 @@ vi.mock('../../api/portfolio', () => ({
     getAccounts,
     getSnapshot,
     getRisk,
+    getPerformance,
+    refreshMarketData,
     refreshFx,
     listImportBrokers,
     listTrades,
@@ -89,6 +95,11 @@ vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   PieChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Pie: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  LineChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Line: () => null,
+  XAxis: () => null,
+  YAxis: () => null,
+  CartesianGrid: () => null,
   Tooltip: () => null,
   Legend: () => null,
   Cell: () => null,
@@ -230,6 +241,77 @@ function makeRisk(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function makePerformance(overrides: Record<string, unknown> = {}) {
+  // The page suite asserts on exact text elsewhere, so the performance panel
+  // stays empty here; its own coverage lives in PortfolioPerformancePanel.test.
+  return {
+    asOf: '2026-03-19',
+    accountId: null,
+    costMethod: 'fifo',
+    currency: 'CNY',
+    summary: {
+      netDeposits: 0,
+      totalEquity: 0,
+      totalCash: 0,
+      totalMarketValue: 0,
+      totalPnl: 0,
+      totalReturnPct: null,
+      realizedPnl: 0,
+      unrealizedPnl: 0,
+      feeTotal: 0,
+      taxTotal: 0,
+      investedRatioPct: null,
+      firstActivityDate: null,
+      daysActive: null,
+      maxDrawdownPct: 0,
+      currentDrawdownPct: 0,
+      positionCount: 0,
+      closedTradeCount: 0,
+      tradeCount: 0,
+      fxStale: false,
+    },
+    closedTrades: {
+      count: 0,
+      wins: 0,
+      losses: 0,
+      winRatePct: null,
+      avgReturnPct: null,
+      avgWinPct: null,
+      avgLossPct: null,
+      profitFactor: null,
+      realizedPnl: 0,
+      avgHoldingDays: null,
+      maxHoldingDays: null,
+      best: null,
+      worst: null,
+      items: [],
+    },
+    openPositions: {
+      count: 0,
+      unrealizedPnl: 0,
+      avgHoldingDays: null,
+      avgReturnPct: null,
+      items: [],
+    },
+    equityCurve: {
+      points: [],
+      maxDrawdownPct: 0,
+      currentDrawdownPct: 0,
+      fxStale: false,
+    },
+    benchmark: {
+      available: false,
+      symbol: '000300',
+      returnPct: null,
+      excessReturnPct: null,
+      series: [],
+      note: null,
+    },
+    notes: [],
+    ...overrides,
+  };
+}
+
 function makeDecisionSignal(overrides: Partial<DecisionSignalItem> = {}): DecisionSignalItem {
   return {
     id: 100,
@@ -292,6 +374,12 @@ describe('PortfolioPage FX refresh', () => {
     getAccounts.mockResolvedValue(makeAccounts());
     getSnapshot.mockImplementation(async ({ accountId }: { accountId?: number } = {}) => makeSnapshot({ accountId, fxStale: true }));
     getRisk.mockResolvedValue(makeRisk());
+    getPerformance.mockResolvedValue(makePerformance());
+    refreshMarketData.mockResolvedValue({
+      asOf: '2026-11-04',
+      positions: { asOf: '2026-11-04', synced: [], failed: [] },
+      benchmark: null,
+    });
     refreshFx.mockResolvedValue({
       asOf: '2026-03-19',
       accountCount: 1,

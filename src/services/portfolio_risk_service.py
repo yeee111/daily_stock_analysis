@@ -70,19 +70,13 @@ class PortfolioRiskService:
             thresholds["concentration_alert_pct"],
             as_of_date=as_of_date,
         )
-        self._ensure_drawdown_snapshot_window(
-            account_id=account_id,
-            as_of_date=as_of_date,
-            cost_method=cost_method,
-            lookback_days=thresholds["lookback_days"],
-            include_realtime=include_realtime,
-        )
         drawdown = self._build_drawdown(
             account_id=account_id,
             as_of_date=as_of_date,
             cost_method=cost_method,
             threshold_pct=thresholds["drawdown_alert_pct"],
             lookback_days=thresholds["lookback_days"],
+            include_realtime=include_realtime,
         )
         stop_loss = self._build_stop_loss(snapshot, thresholds)
         decision_signal_risk = self._build_decision_signal_risk(snapshot)
@@ -463,6 +457,84 @@ class PortfolioRiskService:
             self._data_manager_init_error = str(exc)
             return None
 
+    def build_equity_series(
+        self,
+        *,
+        account_id: Optional[int] = None,
+        as_of: date,
+        cost_method: str = "fifo",
+        lookback_days: int,
+        include_realtime: bool = True,
+    ) -> Dict[str, Any]:
+        """Backfill the snapshot window and return daily equity points in CNY."""
+        self._ensure_drawdown_snapshot_window(
+            account_id=account_id,
+            as_of_date=as_of,
+            cost_method=cost_method,
+            lookback_days=lookback_days,
+            include_realtime=include_realtime,
+        )
+        rows = self.repo.list_daily_snapshots_for_risk(
+            as_of=as_of,
+            cost_method=cost_method,
+            account_id=account_id,
+            lookback_days=lookback_days,
+        )
+        if not rows:
+            return {
+                "points": [],
+                "max_drawdown_pct": 0.0,
+                "current_drawdown_pct": 0.0,
+                "fx_stale": False,
+            }
+
+        grouped: Dict[str, Dict[str, float]] = {}
+        stale_flag = False
+        for row in rows:
+            key = row.snapshot_date.isoformat()
+            bucket = grouped.setdefault(key, {"equity": 0.0, "cash": 0.0, "market_value": 0.0})
+            currency = str(row.base_currency or "CNY")
+            for field, value in (
+                ("equity", row.total_equity),
+                ("cash", row.total_cash),
+                ("market_value", row.total_market_value),
+            ):
+                converted, stale, _ = self.portfolio_service.convert_amount(
+                    amount=float(value or 0.0),
+                    from_currency=currency,
+                    to_currency="CNY",
+                    as_of_date=row.snapshot_date,
+                )
+                bucket[field] += converted
+                stale_flag = stale_flag or stale
+            stale_flag = stale_flag or bool(row.fx_stale)
+
+        points = []
+        peak = 0.0
+        max_drawdown = 0.0
+        for key in sorted(grouped):
+            equity = grouped[key]["equity"]
+            peak = max(peak, equity)
+            drawdown = 0.0 if peak <= 0 else (peak - equity) / peak * 100.0
+            max_drawdown = max(max_drawdown, drawdown)
+            points.append(
+                {
+                    "date": key,
+                    "equity": round(equity, 6),
+                    "cash": round(grouped[key]["cash"], 6),
+                    "market_value": round(grouped[key]["market_value"], 6),
+                    "drawdown_pct": round(drawdown, 4),
+                }
+            )
+        current_drawdown = points[-1]["drawdown_pct"] if points else 0.0
+
+        return {
+            "points": points,
+            "max_drawdown_pct": round(max_drawdown, 4),
+            "current_drawdown_pct": round(current_drawdown, 4),
+            "fx_stale": stale_flag,
+        }
+
     def _build_drawdown(
         self,
         *,
@@ -471,54 +543,21 @@ class PortfolioRiskService:
         cost_method: str,
         threshold_pct: float,
         lookback_days: int,
+        include_realtime: bool = True,
     ) -> Dict[str, Any]:
-        rows = self.repo.list_daily_snapshots_for_risk(
+        series = self.build_equity_series(
+            account_id=account_id,
             as_of=as_of_date,
             cost_method=cost_method,
-            account_id=account_id,
             lookback_days=lookback_days,
+            include_realtime=include_realtime,
         )
-        if not rows:
-            return {
-                "series_points": 0,
-                "max_drawdown_pct": 0.0,
-                "current_drawdown_pct": 0.0,
-                "alert": False,
-                "fx_stale": False,
-            }
-
-        grouped: Dict[str, float] = {}
-        stale_flag = False
-        for row in rows:
-            key = row.snapshot_date.isoformat()
-            converted, stale, _ = self.portfolio_service.convert_amount(
-                amount=float(row.total_equity or 0.0),
-                from_currency=str(row.base_currency or "CNY"),
-                to_currency="CNY",
-                as_of_date=row.snapshot_date,
-            )
-            grouped[key] = grouped.get(key, 0.0) + converted
-            stale_flag = stale_flag or stale or bool(row.fx_stale)
-
-        series: List[Tuple[str, float]] = sorted(grouped.items(), key=lambda item: item[0])
-        peak = 0.0
-        max_drawdown = 0.0
-        current_drawdown = 0.0
-        for _, equity in series:
-            peak = max(peak, equity)
-            if peak <= 0:
-                drawdown = 0.0
-            else:
-                drawdown = (peak - equity) / peak * 100.0
-            max_drawdown = max(max_drawdown, drawdown)
-            current_drawdown = drawdown
-
         return {
-            "series_points": len(series),
-            "max_drawdown_pct": round(max_drawdown, 4),
-            "current_drawdown_pct": round(current_drawdown, 4),
-            "alert": bool(max_drawdown >= threshold_pct),
-            "fx_stale": stale_flag,
+            "series_points": len(series["points"]),
+            "max_drawdown_pct": series["max_drawdown_pct"],
+            "current_drawdown_pct": series["current_drawdown_pct"],
+            "alert": bool(series["max_drawdown_pct"] >= threshold_pct),
+            "fx_stale": series["fx_stale"],
         }
 
     @staticmethod

@@ -1976,9 +1976,12 @@ def main() -> int:
             # by the first task call whatever its outcome. Fail-open by design.
             startup_gate_active = should_run_immediately
 
-            def scheduled_task(scheduled_for=None):
-                nonlocal startup_gate_active
-                gated, startup_gate_active = startup_gate_active, False
+            def _execute_scheduled_task(gated: bool, scheduled_for=None) -> str:
+                """Run one occurrence and return its outcome code.
+
+                Every early exit is an outcome so the caller can collect the
+                run exactly once (see ``scheduled_task``).
+                """
                 runtime_config = _reload_runtime_config()
                 force_run = getattr(args, "force_run", False)
                 if (
@@ -2017,7 +2020,7 @@ def main() -> int:
                                 "启动立即执行已跳过:当日全量分析已完成(%s)",
                                 decision.reason,
                             )
-                            return
+                            return "skipped:startup_dedup"
                         logger.info(
                             "启动立即执行去重检查通过:%s", decision.reason
                         )
@@ -2034,13 +2037,46 @@ def main() -> int:
                         result = run_scheduled_analysis(runtime_config, scheduled_args, scheduled_stock_codes)
                     except ScheduledAnalysisSkipped:
                         logger.info("Scheduled analysis already claimed; skipping occurrence %s", scheduled_for)
-                        return
+                        return "skipped:claimed"
 
                 if result is False:
                     reason = _LAST_ANALYSIS_FAILURE_REASON or "unknown"
                     raise RuntimeError(
                         f"scheduled analysis reported failure: {reason}"
                     )
+                return "success"
+
+            def scheduled_task(scheduled_for=None):
+                nonlocal startup_gate_active
+                gated, startup_gate_active = startup_gate_active, False
+                outcome = "failed"
+                try:
+                    outcome = _execute_scheduled_task(gated, scheduled_for)
+                finally:
+                    # Paper trading reads due batches and resting exits from
+                    # the DB, so it must run for every outcome — a skipped or
+                    # failed analysis must not swallow today's fills.
+                    logger.info("Scheduled task outcome: %s", outcome)
+                    try:
+                        from src.services.paper_trading_service import maybe_run_after_analysis
+
+                        maybe_run_after_analysis(trigger=f"cli_hook:{outcome}")
+                    except Exception as exc:  # noqa: BLE001 - paper trading is opt-in and non-critical
+                        logger.exception(f"Paper trading auto-run failed: {exc}")
+
+            def _paper_trading_schedule_times():
+                from src.scheduler import normalize_schedule_times
+
+                raw = (os.getenv("PAPER_TRADING_SCHEDULE_TIMES") or "").strip()
+                return normalize_schedule_times(raw or None, fallback_time="18:05")
+
+            def _run_paper_trading_schedule():
+                try:
+                    from src.services.paper_trading_service import maybe_run_after_analysis
+
+                    maybe_run_after_analysis(trigger="paper_trading_schedule")
+                except Exception as exc:  # noqa: BLE001 - never kill the scheduler loop
+                    logger.exception(f"Paper trading scheduled run failed: {exc}")
 
             background_tasks = []
             if getattr(config, 'agent_event_monitor_enabled', False):
@@ -2069,6 +2105,14 @@ def main() -> int:
                 "background_tasks": background_tasks,
                 "schedule_time_provider": schedule_time_provider,
                 "pass_scheduled_for": True,
+                "extra_daily_tasks": [
+                    {
+                        "task": _run_paper_trading_schedule,
+                        "schedule_times_provider": _paper_trading_schedule_times,
+                        "fallback_time": "18:05",
+                        "name": "paper_trading",
+                    }
+                ],
             }
             if hasattr(config, "schedule_times"):
                 schedule_kwargs["schedule_times"] = config.schedule_times

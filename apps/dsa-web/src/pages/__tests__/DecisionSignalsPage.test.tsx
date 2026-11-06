@@ -761,6 +761,8 @@ describe('DecisionSignalsPage', () => {
       triggerSource: 'api',
       action: 'buy',
       status: 'active',
+      createdAt: new Date(Date.now() - 1000).toISOString(),
+      updatedAt: new Date(Date.now() - 1000).toISOString(),
       metadata: {
         decision_profile: 'balanced',
         profile_source: 'user_selected',

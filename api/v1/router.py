@@ -23,6 +23,7 @@ from api.v1.endpoints import (
     health,
     history,
     intelligence,
+    paper_trading,
     portfolio,
     smart_scan,
     stocks,
@@ -98,6 +99,12 @@ router.include_router(
     decision_signals.router,
     prefix="/decision-signals",
     tags=["DecisionSignals"]
+)
+
+router.include_router(
+    paper_trading.router,
+    prefix="/paper-trading",
+    tags=["PaperTrading"]
 )
 
 router.include_router(

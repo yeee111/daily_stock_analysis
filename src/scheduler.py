@@ -124,6 +124,7 @@ class Scheduler:
         self._pass_scheduled_for = pass_scheduled_for
         self._daily_job: Optional[Any] = None
         self._daily_jobs: List[Any] = []
+        self._extra_daily_tasks: List[Dict[str, Any]] = []
         self._background_tasks: List[Dict[str, Any]] = []
         self._lifecycle_lock = threading.Lock()
         self._running = False
@@ -152,6 +153,105 @@ class Scheduler:
         if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", candidate):
             return False
         return True
+
+    def add_daily_task(
+        self,
+        task: Callable[[], None],
+        *,
+        schedule_times: Optional[Sequence[str]] = None,
+        schedule_times_provider: Optional[Callable[[], Union[Sequence[str], str]]] = None,
+        fallback_time: str = "18:00",
+        name: str = "extra",
+    ) -> bool:
+        """Register an independent daily task group alongside the main task.
+
+        Each group owns its own times and jobs, so a task such as paper trading
+        keeps running even when the main analysis schedule is skipped or never
+        starts. Times are re-read from ``schedule_times_provider`` on every
+        scheduler loop iteration.
+        """
+
+        entry: Dict[str, Any] = {
+            "name": name,
+            "task": task,
+            "schedule_times_provider": schedule_times_provider,
+            "fallback_time": fallback_time,
+            "times": [],
+            "jobs": [],
+        }
+        self._extra_daily_tasks.append(entry)
+        if schedule_times is None and schedule_times_provider is not None:
+            try:
+                schedule_times = schedule_times_provider()
+            except Exception as exc:  # pragma: no cover - defensive branch
+                logger.warning("读取独立定时任务 %s 的执行时间失败: %s", name, exc)
+        return self._configure_extra_daily_task(entry, schedule_times)
+
+    def _register_extra_daily_job(self, entry: Dict[str, Any], schedule_time: str) -> Any:
+        job = self.schedule.every().day.at(schedule_time)
+
+        def _run() -> None:
+            try:
+                logger.info("独立定时任务开始执行: %s", entry["name"])
+                entry["task"]()
+                logger.info("独立定时任务执行完成: %s", entry["name"])
+            except Exception as exc:  # noqa: BLE001 - one bad run must not kill the loop
+                logger.exception("独立定时任务执行失败 [%s]: %s", entry["name"], exc)
+
+        return job.do(_run)
+
+    def _cancel_extra_daily_jobs(self, entry: Dict[str, Any]) -> None:
+        for job in entry.get("jobs") or []:
+            if job is None:
+                continue
+            if hasattr(self.schedule, "cancel_job"):
+                self.schedule.cancel_job(job)
+            else:  # pragma: no cover - compatibility fallback
+                jobs = getattr(self.schedule, "jobs", None)
+                if isinstance(jobs, list) and job in jobs:
+                    jobs.remove(job)
+        entry["jobs"] = []
+
+    def _configure_extra_daily_task(
+        self,
+        entry: Dict[str, Any],
+        schedule_times: Optional[Union[Sequence[str], str]],
+    ) -> bool:
+        candidates = normalize_schedule_times(
+            schedule_times,
+            fallback_time=entry.get("fallback_time") or "18:00",
+        )
+        if candidates == entry["times"] and entry["jobs"]:
+            return True
+        self._cancel_extra_daily_jobs(entry)
+        entry["jobs"] = [
+            self._register_extra_daily_job(entry, candidate)
+            for candidate in candidates
+        ]
+        entry["times"] = candidates
+        logger.info(
+            "已注册独立定时任务 %s，执行时间: %s",
+            entry["name"],
+            ",".join(candidates),
+        )
+        return True
+
+    def _refresh_extra_daily_tasks_if_needed(self) -> None:
+        for entry in list(self._extra_daily_tasks):
+            provider = entry.get("schedule_times_provider")
+            if provider is None:
+                continue
+            try:
+                latest = provider()
+            except Exception as exc:  # pragma: no cover - defensive branch
+                logger.warning(
+                    "读取独立定时任务 %s 的最新执行时间失败，沿用 %s: %s",
+                    entry["name"],
+                    ",".join(entry["times"]),
+                    exc,
+                )
+                continue
+            self._configure_extra_daily_task(entry, latest)
 
     def _cancel_daily_job(self) -> None:
         """Remove the currently registered daily job if one exists."""
@@ -415,6 +515,7 @@ class Scheduler:
 
         while self._running and not self.shutdown_handler.should_shutdown:
             self._refresh_daily_schedule_if_needed()
+            self._refresh_extra_daily_tasks_if_needed()
             self.schedule.run_pending()
             if not self._dispatch_background_tasks_if_running():
                 break
@@ -440,6 +541,8 @@ class Scheduler:
             self._stop_requested = True
             self._running = False
         self._cancel_daily_job()
+        for entry in self._extra_daily_tasks:
+            self._cancel_extra_daily_jobs(entry)
 
 
 def run_with_schedule(
@@ -451,6 +554,7 @@ def run_with_schedule(
     schedule_times: Optional[Sequence[str]] = None,
     schedule_times_provider: Optional[Callable[[], Union[Sequence[str], str]]] = None,
     pass_scheduled_for: bool = False,
+    extra_daily_tasks: Optional[List[Dict[str, Any]]] = None,
 ):
     """
     便捷函数：使用定时调度运行任务
@@ -482,6 +586,14 @@ def run_with_schedule(
             interval_seconds=entry["interval_seconds"],
             run_immediately=entry.get("run_immediately", False),
             name=entry.get("name"),
+        )
+    for entry in extra_daily_tasks or []:
+        scheduler.add_daily_task(
+            entry["task"],
+            schedule_times=entry.get("schedule_times"),
+            schedule_times_provider=entry.get("schedule_times_provider"),
+            fallback_time=entry.get("fallback_time", "18:00"),
+            name=entry.get("name", "extra"),
         )
     scheduler.set_daily_task(task, run_immediately=run_immediately)
     scheduler.run()

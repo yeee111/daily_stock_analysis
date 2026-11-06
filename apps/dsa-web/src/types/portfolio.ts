@@ -180,6 +180,151 @@ export interface PortfolioRiskResponse {
   decisionSignalRisk?: PortfolioDecisionSignalRiskBlock;
 }
 
+export interface PortfolioPerformanceClosedTradeItem {
+  stockCode: string;
+  market: string;
+  currency: string;
+  openDate: string;
+  closeDate: string;
+  holdingDays: number;
+  quantity: number;
+  avgCost?: number | null;
+  avgPrice?: number | null;
+  costBasis: number;
+  proceeds: number;
+  pnl: number;
+  returnPct?: number | null;
+  fxStale: boolean;
+}
+
+export interface PortfolioPerformanceClosedTradeBlock {
+  count: number;
+  wins: number;
+  losses: number;
+  winRatePct?: number | null;
+  avgReturnPct?: number | null;
+  avgWinPct?: number | null;
+  avgLossPct?: number | null;
+  profitFactor?: number | null;
+  realizedPnl: number;
+  avgHoldingDays?: number | null;
+  maxHoldingDays?: number | null;
+  best?: PortfolioPerformanceClosedTradeItem | null;
+  worst?: PortfolioPerformanceClosedTradeItem | null;
+  items: PortfolioPerformanceClosedTradeItem[];
+}
+
+export interface PortfolioPerformancePositionItem {
+  stockCode: string;
+  market: string;
+  currency: string;
+  openDate: string;
+  holdingDays: number;
+  quantity: number;
+  avgCost?: number | null;
+  lastPrice?: number | null;
+  costBasis: number;
+  marketValue: number;
+  unrealizedPnl: number;
+  returnPct?: number | null;
+  weightPct?: number | null;
+  priceStale: boolean;
+}
+
+export interface PortfolioPerformancePositionBlock {
+  count: number;
+  unrealizedPnl: number;
+  avgHoldingDays?: number | null;
+  avgReturnPct?: number | null;
+  items: PortfolioPerformancePositionItem[];
+}
+
+export interface PortfolioPerformanceEquityPoint {
+  date: string;
+  equity: number;
+  cash: number;
+  marketValue: number;
+  drawdownPct: number;
+  returnPct?: number | null;
+  benchmarkReturnPct?: number | null;
+}
+
+export interface PortfolioPerformanceEquityCurve {
+  points: PortfolioPerformanceEquityPoint[];
+  maxDrawdownPct: number;
+  currentDrawdownPct: number;
+  fxStale: boolean;
+}
+
+export interface PortfolioPerformanceBenchmarkPoint {
+  date: string;
+  close: number;
+  returnPct: number;
+}
+
+export interface PortfolioPerformanceBenchmark {
+  available: boolean;
+  symbol?: string | null;
+  returnPct?: number | null;
+  excessReturnPct?: number | null;
+  series: PortfolioPerformanceBenchmarkPoint[];
+  note?: string | null;
+}
+
+export interface PortfolioPerformanceSummary {
+  netDeposits: number;
+  totalEquity: number;
+  totalCash: number;
+  totalMarketValue: number;
+  totalPnl: number;
+  totalReturnPct?: number | null;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  feeTotal: number;
+  taxTotal: number;
+  investedRatioPct?: number | null;
+  firstActivityDate?: string | null;
+  daysActive?: number | null;
+  maxDrawdownPct: number;
+  currentDrawdownPct: number;
+  positionCount: number;
+  closedTradeCount: number;
+  tradeCount: number;
+  fxStale: boolean;
+}
+
+export interface PortfolioPerformanceResponse {
+  asOf: string;
+  accountId?: number | null;
+  costMethod: PortfolioCostMethod;
+  currency: string;
+  summary: PortfolioPerformanceSummary;
+  closedTrades: PortfolioPerformanceClosedTradeBlock;
+  openPositions: PortfolioPerformancePositionBlock;
+  equityCurve: PortfolioPerformanceEquityCurve;
+  benchmark: PortfolioPerformanceBenchmark;
+  notes: string[];
+}
+
+export interface PortfolioMarketDataPositionSync {
+  asOf: string;
+  synced: string[];
+  failed: string[];
+}
+
+export interface PortfolioMarketDataIndexSync {
+  symbol: string;
+  synced: number;
+  latestDate?: string | null;
+  error?: string | null;
+}
+
+export interface PortfolioMarketDataRefreshResponse {
+  asOf: string;
+  positions: PortfolioMarketDataPositionSync;
+  benchmark?: PortfolioMarketDataIndexSync | null;
+}
+
 export interface PortfolioTradeCreateRequest {
   accountId: number;
   symbol: string;

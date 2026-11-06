@@ -22,7 +22,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [新功能] 定时模式启动立即执行的当日去重（`SCHEDULE_STARTUP_DEDUP`，默认开启）：`python main.py --schedule` 在 `SCHEDULE_RUN_IMMEDIATELY=true` 触发启动补跑前检查标记文件（位于 `DATABASE_PATH` 所在目录，默认 `data/analysis_run_state.json`），当天已有成功且覆盖当前应分析清单的全量分析（日期 + scope=full + 覆盖面子集判定）则跳过，否则照常补跑；每日定时任务与手动/API/GitHub Actions 触发永不去重；标记缺失、损坏、schema 未知或覆盖不全一律 fail-open 执行（绝不漏跑）；大盘复盘完成度仅记录、不参与判定（复盘补齐由每日定时任务覆盖）；设 `SCHEDULE_STARTUP_DEDUP=false` 可回到此前"每次容器重启都全量重跑"的行为；`--force-run` 可绕过启动去重检查（明确要求立即全量分析）。
 - [修复] 收紧定时模式启动去重：仅当全部应分析标的都成功时才记录当日标记（部分失败或全败、即使大盘复盘成功也不得记录，避免重启漏跑）；跳过判定改为覆盖面子集校验并升版 schema 2（v1 旧标记一律 fail-open 重跑一次以升级），`SCHEDULE_STARTUP_DEDUP` 进程环境变量与 .env 值不同时以进程为准（与 `SCHEDULE_RUN_IMMEDIATELY` 同权）。
 - [修复] 定时模式启动去重检查的预期清单改为与运行入口一致的真实目标解析链（Futu 持仓优先、其次 .env 热更新 `STOCK_LIST`、再按交易日过滤）：`--portfolio futu` 新增持仓、纯持仓部署自选为空、以及进程 env 启动后 .env 热更新三类场景不再误跳过；持仓解析失败或解析为空一律 fail-open 照常执行（绝不漏跑），非持仓空清单保持既有当日去重语义。
+- [新功能] 新增纸面交易（`POST /api/v1/paper-trading/run`、`scripts/paper_trading_run.py`、`/portfolio` 页面卡片）：按信号创建日的下一个交易日分批，只处理成交日等于最新 A 股日线的批次，按开盘价在现有组合账户里模拟成交，自动应用等权仓位、T+1、整手、涨跌停与 A 股费用，`trade_uid` 幂等；默认干跑，定时分析成功后可经 `PAPER_TRADING_AUTO_RUN` 可选自动执行，详见 `docs/paper-trading.md`。
 - [新功能] 新增智能扫描 API（`POST /api/v1/smart-scan/scan`、`GET /api/v1/smart-scan/scan/{scan_id}`、`GET /api/v1/smart-scan/history`）：批量提交股票池 AI 分析，汇总本次扫描的决策信号并按动作与评分输出买入排名、动作分布和评分分布；重复输入记为 skipped、单票失败不影响其余标的、信号超过单页上限自动翻页；扫描不发送推送通知，进度复用任务队列查询，详见 `docs/smart-scan.md`。
+- [新功能] 新增组合业绩看板（`GET /api/v1/portfolio/performance`、`/portfolio` 页面纸面交易卡下方）：按净入金计算总收益率，输出已实现/浮动盈亏、费用、仓位占比、最大与当前回撤；已平仓交易按 FIFO 用每笔卖出配对最早剩余批次，给出胜率、盈亏比、平均/最长持有天数与逐笔明细；当前持仓给出持有天数、收益率与权重；净值曲线复用风险服务的每日快照回填与 CNY 折算，可叠加基准收益率（`PORTFOLIO_PERFORMANCE_BENCHMARK_SYMBOL`，默认 `000300`），本地无指数日线时基准对比降级为文字提示；已平仓不足 30 笔等样本问题在“口径与提示”中明确标注。
+- [改进] `PortfolioRiskService` 抽出公开的 `build_equity_series()`（回填快照窗口 + 按日聚合现金/市值/权益 + 逐点回撤），风险报告的回撤块改为复用它，业绩看板与风险看板因此共用同一份净值口径。
+- [测试] 新增 `tests/test_portfolio_performance_service.py`（13 例：FIFO 配对、盈亏比、部分卖出剩余批次、净入金与回撤、时间加权收益率、基准可用/缺失/自动补数、日线入库代码、补数入口只补缺价持仓、空账户、接口连通）与 `apps/dsa-web/src/components/portfolio/__tests__/PortfolioPerformancePanel.test.tsx`（7 例，含"刷新行情"切实时价与提示文案）。
+- [新功能] 纸面交易新增可交易板块约束（`PAPER_TRADING_ALLOWED_BOARDS`，默认 `main,gem`）：科创板（688）、北交所（4/8 开头）与港股（`HKxxxxx` / `xxxxx.HK`）的买入信号只在计划表标注“不在可交易板块，跳过”，不占持仓名额；卖出与止盈止损不受限，便于模拟真实账户权限。
+- [文档] `docs/full-guide.md`、`docs/full-guide_EN.md`、`.env.example` 与 `docs/architecture/api_spec.json` 同步业绩看板接口、指标口径与基准配置。
+- [改进] 业绩看板总收益率改为时间加权（TWR）：按日链式 `(当日权益 − 当日出入金) / 前日权益`，出入金统一按当日收盘计，入金时点不再扭曲收益率；净值曲线逐点给出 `return_pct`，曲线终点与头部指标同源，总盈亏仍为 `总权益 − 净入金`，口径写入"口径与提示"。
+- [新功能] 基准指数本地缺日线时自动回源补数（腾讯 `web.ifzq.gtimg.cn` 优先、东方财富 `push2his` 兜底，`PORTFOLIO_MARKET_DATA_SYNC_ENABLED` 默认开启），业绩看板由此拿到真实基准对比；新增 `POST /api/v1/portfolio/market-data/refresh` 与看板"刷新行情"按钮，按钮按实时价重算持仓并补齐基准，仅对本地完全缺价的持仓回补日线。
+- [改进] 指数日线以带市场前缀的代码入库（`sh000300`）并显式双写 `canonical_id`，读取时同时兼容裸码配置，避免裸码股票桶被指数收盘污染（`000001` 既是平安银行又是上证指数）；裸码入库会被 `_backfill_canonical_ids()` 在重启时改回股票身份，因此不能作为指数数据的存储键。
+- [新功能] 纸面交易执行建仓信号的止盈止损：按成交 `note` 里的信号 id 回读 `stop_loss` / `target_price` 作为常驻委托，最低价触及止损、最高价触及目标价即成交，跳空穿过按开盘价（更不利一侧）成交，开盘跌停则继续持有并标注；止损与目标价同时触发时止损优先，当日已卖出的标的不会在同一开盘重复开仓。
+- [新功能] 纸面交易未成交委托顺延：开盘涨跌停或停牌导致没成交的委托可在 `PAPER_TRADING_RETRY_DAYS`（默认 3）个交易日内顺延重试，报价与仓位按新成交日重算，`trade_uid` 保留原始成交日防重复下单；中间存在可成交却未成交的交易日（漏跑）时放弃委托并提示，不用过期价格补单。
+- [新功能] 纸面交易自动登记分红送转（`PAPER_TRADING_CORPORATE_ACTIONS`，默认开启）：每次非干跑按持仓代码拉取已实施的现金分红与送转（东财 `stock_fhps_detail_em` → 新浪 `stock_history_dividend_detail` → 巨潮 `stock_dividend_cninfo`），按（代码、除权日、类型）去重写入公司行动，解决前复权日线下分红从盈亏里消失的问题；响应新增 `corporate_actions` 字段，`/portfolio` 卡片同步展示。
+- [测试] 纸面交易新增 10 例（止盈、止损、跳空、跌停放弃、顺延成交/漏跑放弃/重试上限/已成交跳过、分红送转登记与去重），`tests/test_fundamental_adapter.py` 新增 4 例覆盖三种分红表的列布局与 fail-open。
+- [修复] 定时分析的纸面交易钩子改在统一收口处触发：watchdog 以成功、跳过、失败、超时、worker 丢失或自身异常结束时都会触发一次并记录结束原因；`busy`（另一轮占用）与被新一代取代的运行不触发，避免重复执行。
+- [新功能] 纸面交易新增独立定时触发 `PAPER_TRADING_SCHEDULE_TIMES`（默认 `18:05,19:00`），与分析的定时解耦，当天分析从未启动、被跳过或超时也照常执行；`src/scheduler.py` 支持在同一定时器内注册多组独立每日任务，避免第二个调度器实例重复派发已有任务。
+- [新功能] 纸面交易新增漏跑补跑：早于最新数据日的未执行批次按成交日升序逐日重放，每批保留各自开盘价、参考日与顺序演进的账户状态，`trade_uid` 保证重复补跑不重复写入；单次上限由 `PAPER_TRADING_CATCHUP_DAYS`（默认 5）控制，干跑同样只出计划不写库。
+- [测试] 新增 watchdog 结束原因单一触发、独立每日任务组、升序补跑/重复补跑/干跑/上限、CLI 与调度器独立定时的回归用例。
+- [修复] 业绩看板基准指数自动追平本地个股日线：本地已有 2 个以上指数点但序列落后于个股最新日线时也会回源增量补齐（不再只在少于 2 个点时补数），同一“指数 + 报告日 + 本地最新日线”组合 5 分钟内不重复请求；修复基准收益率停在旧交易日、而持仓已按新收盘价估值的问题。
+- [新功能] 纸面交易新增可选成本模型（默认关闭，不改变现有账本口径）：`PAPER_TRADING_SLIPPAGE_BPS` 对每笔成交施加单边不利滑点（买入上浮、卖出下调，受涨跌停价约束），`PAPER_TRADING_MAX_ADV_PCT` / `PAPER_TRADING_ADV_WINDOW_DAYS` 把单笔数量限制在 N 日均量的指定百分比内，超出按整手裁剪、不足一手则跳过。
+- [测试] 新增滑点方向与涨跌停钳制、ADV 裁剪到整手/裁到 0 跳过、止盈止损部分成交的回归用例。
+- [文档] `docs/paper-trading.md`、`docs/full-guide.md`、`docs/full-guide_EN.md` 与 `.env.example` 同步成本模型配置；新增 `scripts/paper_trading_cost_audit.py`，在临时库中对现有成交做反事实重定价，输出不同滑点下的胜率、盈亏比、总收益与流动性占用。
 
 ## [3.33.0] - 2026-10-15
 

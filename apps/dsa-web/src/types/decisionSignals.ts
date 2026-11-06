@@ -6,7 +6,7 @@ import type { DecisionAction, MarketPhaseValue, ReportLanguage } from './analysi
  */
 export type DecisionSignalOpaqueJson = unknown;
 
-export type DecisionSignalSourceType = 'analysis' | 'agent' | 'alert' | 'market_review' | 'manual';
+export type DecisionSignalSourceType = 'analysis' | 'agent' | 'alert' | 'market_review' | 'manual' | 'screening';
 export type DecisionSignalStatus = 'active' | 'expired' | 'invalidated' | 'closed' | 'archived';
 export type DecisionSignalPlanQuality = 'complete' | 'partial' | 'minimal' | 'unknown';
 export type DecisionSignalHorizon = 'intraday' | '1d' | '3d' | '5d' | '10d' | 'swing' | 'long';

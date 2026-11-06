@@ -433,6 +433,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
@@ -824,6 +825,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
@@ -1020,6 +1022,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["resolved_schedule_time"] = (
@@ -1091,6 +1094,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["task"] = task
 
@@ -1127,6 +1131,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately
@@ -1182,6 +1187,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["background_tasks"] = background_tasks or []
 
@@ -1297,6 +1303,7 @@ class MainScheduleModeTestCase(unittest.TestCase):
             background_tasks=None,
             schedule_time_provider=None,
             pass_scheduled_for=False,
+            extra_daily_tasks=None,
         ):
             scheduled_call["schedule_time"] = schedule_time
             scheduled_call["run_immediately"] = run_immediately

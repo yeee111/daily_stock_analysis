@@ -1938,6 +1938,8 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 - 直接在 Web 页面新增账户、删除误建账户，或录入交易、现金流水、公司行动等事件。
 - 通过 CSV 导入持仓记录，支持先 `dry_run` 预览，再决定是否正式写入。
 - 在事件列表中按账户、日期、方向、代码等条件筛选，并对单账户事件做删除修正。
+- 在纸面交易卡片下方查看业绩看板：总收益率（时间加权 TWR：按日链式收益，出入金计入当日收盘，不受入金时点影响）、总盈亏（= 总权益 − 净入金）、已实现/浮动盈亏、最大回撤、已平仓交易的胜率/盈亏比/平均持有天数，以及净值-回撤-基准折线。已平仓交易按 FIFO 用卖出配对最早剩余批次，一笔卖出产出一条配对记录；基准指数取 `PORTFOLIO_PERFORMANCE_BENCHMARK_SYMBOL`（默认 `000300`）的本地日线，本地缺该指数日线、或指数日线落后于本地个股最新日线时会自动回源补数（腾讯 `web.ifzq.gtimg.cn` 优先，东方财富 `push2his` 兜底），两路都失败才降级为文字提示，不影响其它指标。样本不足（已平仓 < 30 笔）会在“口径与提示”里明确标注。
+- 页面默认用本地收盘价估值，盘中当日日线尚未落地时持仓会标出“价格过期”。点业绩看板的“刷新行情”按钮会按实时价重算持仓并补齐基准，页面随后保持实时价刷新；该按钮只为本地完全缺价的持仓回补日线，不会逐只重拉已有日线的持仓。
 
 ### 相关接口
 
@@ -1945,6 +1947,8 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 |------|------|------|
 | `/api/v1/portfolio/snapshot` | GET | 查询持仓快照 |
 | `/api/v1/portfolio/risk` | GET | 查询风险摘要 |
+| `/api/v1/portfolio/performance` | GET | 查询业绩看板（已平仓配对、胜率/盈亏比、净值与回撤、基准对比） |
+| `/api/v1/portfolio/market-data/refresh` | POST | 手动补齐基准指数日线，并为本地完全缺价的持仓回补日线 |
 | `/api/v1/portfolio/trades` | GET | 分页查询交易记录 |
 | `/api/v1/portfolio/cash-ledger` | GET | 分页查询现金流水 |
 | `/api/v1/portfolio/corporate-actions` | GET | 分页查询公司行动 |
@@ -1967,7 +1971,22 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 - 持仓快照的 `positions[]` 会返回 `price_source`、`price_date`、`price_stale`、`price_available` 等价格元信息；当天快照默认会先尝试实时行情，实时价不可用或非正值时再回退到 `as_of` 当天或之前最近的历史收盘价；传入 `include_realtime=false` 时会跳过实时行情并直接使用本地历史收盘价回退路径，Web 持仓页用该模式优先渲染持仓列表，避免外部实时行情源变慢时阻塞首屏。历史 `as_of` 快照不会拉取实时价，也不会再把成本价静默当作现价；缺价持仓会标记 `price_available=false` 并从市值与未实现盈亏汇总中排除。
 - 汇率刷新会先尝试在线源；若在线获取失败，则回退到最近一次缓存并标记 `is_stale=true`，避免快照和风险页整体不可用。
 - 当 `PORTFOLIO_FX_UPDATE_ENABLED=false` 时，手动刷新接口会明确返回“在线刷新已禁用”，页面不会误导为“当前没有可刷新的汇率对”。
+- 业绩看板的基准指数日线补数由 `PORTFOLIO_MARKET_DATA_SYNC_ENABLED` 控制（默认 `true`）：本地缺基准日线、或本地指数日线落后于本地个股最新日线时回源补数（同一“指数 + 报告日 + 本地最新日线”组合 5 分钟内不重复请求），日线以带市场前缀的代码入库（如 `sh000300`），避免与裸码股票桶（`000001` 既是平安银行又是上证指数）互相污染；关闭后基准缺数只降级为文字提示，不发起外部请求。
 - 风险摘要包含集中度、回撤、止损接近度等信息；`sector_concentration` 会优先尝试按板块归类，失败时降级到 `UNCLASSIFIED`，不会阻断风险结果返回。
+
+### 纸面交易执行规则
+
+纸面交易把 `active` 决策信号转成组合账户里的模拟流水，规则如下：
+
+- 成交口径：信号 `created_at` 的下一个交易日，按开盘价成交；按参考日收盘持仓做 T+1 校验，整手（主板 100 股、科创板 ≥200 股、北交所 ≥100 股），费用为佣金万 2.5（最低 5 元）+ 过户费 0.001% + 卖出印花税 0.05%。
+- 止盈止损：建仓后按该笔成交 `note` 里记录的信号 id 回读信号，用其中的 `stop_loss` / `target_price` 生成常驻委托。当日最高价触及目标价、最低价触及止损价即视为触发；跳空穿过时按开盘价成交（对持仓更不利的一侧）；开盘一字跌停无法卖出时继续持有并在计划里标注。止损与目标价同时触发时止损优先。
+- 顺延重试：因开盘涨停（买入）或跌停/停牌（卖出）没成交的委托，在 `PAPER_TRADING_RETRY_DAYS`（默认 3）个交易日内顺延到能成交的那天，报价与仓位仍按新成交日的前一交易日收盘重算；`trade_uid` 保留原始成交日，避免同一天被重复下单。若中间某个交易日其实可成交（说明当天漏跑了），委托放弃并给出“漏跑”提示，不会用过期价格补单。
+- 分红送转：本地日线是前复权，不登记公司行动会把分红收益漏掉。非干跑且 `PAPER_TRADING_CORPORATE_ACTIONS=true`（默认）时，每次运行会对持仓代码拉取已实施的现金分红与送转（东财 `stock_fhps_detail_em` → 新浪 `stock_history_dividend_detail` → 巨潮 `stock_dividend_cninfo` 逐级回退），按（代码、除权日、类型）去重写入公司行动；分红按税前口径，送转折算成持股倍数。登记后组合缓存会按除权日失效并重放，因此权益曲线与浮动盈亏会自动包含这部分收益。接口返回里的 `corporate_actions` 就是本次新登记的条目。
+- 可交易板块：`PAPER_TRADING_ALLOWED_BOARDS`（默认 `main,gem`）只约束**开新仓**。科创板、北交所、港股的买入信号会标「不在可交易板块，跳过」，不占持仓名额；已有的科创板/港股持仓仍可正常卖出与触发止盈止损。
+- 补跑：停机、分析失败或行情补给延迟留下的「成交日已过、批次没跑」会在下次运行时按成交日升序自动补上，每个批次单独使用自己的开盘价与参考日，账户状态按时间顺序演进；单次最多补 `PAPER_TRADING_CATCHUP_DAYS`（默认 5）个交易日，超出部分下次继续，`trade_uid` 保证重复补跑不产生重复流水。
+- 定时触发：`PAPER_TRADING_AUTO_RUN=true` 时有两处触发，共用同一幂等层——①定时分析结束后触发一次，无论分析成功、跳过、失败、超时、worker 丢失还是 watchdog 异常（分析因其他运行占用而跳过、或本次运行被新一代取代时不触发）；②按 `PAPER_TRADING_SCHEDULE_TIMES`（默认 `18:05,19:00`）独立定时执行，与分析的定时解耦，当天分析完全没跑也照常执行。触发来源（`analysis_hook:<outcome>` / `paper_trading_schedule` / `cli_hook:<outcome>`）会写进日志。
+- 成本模型（可选，默认关闭）：`PAPER_TRADING_SLIPPAGE_BPS` 对每笔成交做单边不利滑点（买入上浮、卖出下调，且不越过涨跌停价）；`PAPER_TRADING_MAX_ADV_PCT` 把单笔数量限制在 `PAPER_TRADING_ADV_WINDOW_DAYS`（默认 20）日均成交量的指定百分比内，超出按整手裁剪、裁到不足一手则跳过。两项都设为 `0` 时与旧口径完全一致。`scripts/paper_trading_cost_audit.py` 可对现有账本做反事实重定价，量化不同滑点下的胜率、盈亏比与总收益变化，并在临时库中运行、不改动真实数据。
+- 运行入口：Web 持仓页的纸面交易卡片（试跑 / 执行一次），接口 `POST /api/v1/paper-trading/run`；定时任务可用 `PAPER_TRADING_AUTO_RUN` / `PAPER_TRADING_AUTO_APPLY` 打开。
 
 ### Agent 读取持仓
 

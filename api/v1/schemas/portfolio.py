@@ -297,3 +297,132 @@ class PortfolioRiskResponse(BaseModel):
     drawdown: Dict[str, Any] = Field(default_factory=dict)
     stop_loss: Dict[str, Any] = Field(default_factory=dict)
     decision_signal_risk: PortfolioDecisionSignalRiskBlock = Field(default_factory=PortfolioDecisionSignalRiskBlock)
+
+
+class PortfolioPerformanceClosedTradeItem(BaseModel):
+    stock_code: str
+    market: str
+    currency: str = "CNY"
+    open_date: str
+    close_date: str
+    holding_days: int
+    quantity: float
+    avg_cost: Optional[float] = None
+    avg_price: Optional[float] = None
+    cost_basis: float
+    proceeds: float
+    pnl: float
+    return_pct: Optional[float] = None
+    fx_stale: bool = False
+
+
+class PortfolioPerformanceClosedTradeBlock(BaseModel):
+    count: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate_pct: Optional[float] = None
+    avg_return_pct: Optional[float] = None
+    avg_win_pct: Optional[float] = None
+    avg_loss_pct: Optional[float] = None
+    profit_factor: Optional[float] = None
+    realized_pnl: float = 0.0
+    avg_holding_days: Optional[float] = None
+    max_holding_days: Optional[int] = None
+    best: Optional[PortfolioPerformanceClosedTradeItem] = None
+    worst: Optional[PortfolioPerformanceClosedTradeItem] = None
+    items: List[PortfolioPerformanceClosedTradeItem] = Field(default_factory=list)
+
+
+class PortfolioPerformancePositionItem(BaseModel):
+    stock_code: str
+    market: str
+    currency: str = "CNY"
+    open_date: str
+    holding_days: int
+    quantity: float
+    avg_cost: Optional[float] = None
+    last_price: Optional[float] = None
+    cost_basis: float
+    market_value: float
+    unrealized_pnl: float
+    return_pct: Optional[float] = None
+    weight_pct: Optional[float] = None
+    price_stale: bool = False
+
+
+class PortfolioPerformancePositionBlock(BaseModel):
+    count: int = 0
+    unrealized_pnl: float = 0.0
+    avg_holding_days: Optional[float] = None
+    avg_return_pct: Optional[float] = None
+    items: List[PortfolioPerformancePositionItem] = Field(default_factory=list)
+
+
+class PortfolioPerformanceEquityPoint(BaseModel):
+    date: str
+    equity: float
+    cash: float = 0.0
+    market_value: float = 0.0
+    drawdown_pct: float = 0.0
+    return_pct: Optional[float] = None
+    benchmark_return_pct: Optional[float] = None
+
+
+class PortfolioPerformanceEquityCurve(BaseModel):
+    points: List[PortfolioPerformanceEquityPoint] = Field(default_factory=list)
+    max_drawdown_pct: float = 0.0
+    current_drawdown_pct: float = 0.0
+    fx_stale: bool = False
+
+
+class PortfolioPerformanceBenchmarkPoint(BaseModel):
+    date: str
+    close: float
+    return_pct: float
+
+
+class PortfolioPerformanceBenchmark(BaseModel):
+    available: bool = False
+    symbol: Optional[str] = None
+    return_pct: Optional[float] = None
+    excess_return_pct: Optional[float] = None
+    series: List[PortfolioPerformanceBenchmarkPoint] = Field(default_factory=list)
+    note: Optional[str] = None
+
+
+class PortfolioPerformanceResponse(BaseModel):
+    as_of: str
+    account_id: Optional[int] = None
+    cost_method: str
+    currency: str
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    closed_trades: PortfolioPerformanceClosedTradeBlock = Field(
+        default_factory=PortfolioPerformanceClosedTradeBlock
+    )
+    open_positions: PortfolioPerformancePositionBlock = Field(
+        default_factory=PortfolioPerformancePositionBlock
+    )
+    equity_curve: PortfolioPerformanceEquityCurve = Field(
+        default_factory=PortfolioPerformanceEquityCurve
+    )
+    benchmark: PortfolioPerformanceBenchmark = Field(default_factory=PortfolioPerformanceBenchmark)
+    notes: List[str] = Field(default_factory=list)
+
+
+class PortfolioMarketDataPositionSync(BaseModel):
+    as_of: str
+    synced: List[str] = Field(default_factory=list)
+    failed: List[str] = Field(default_factory=list)
+
+
+class PortfolioMarketDataIndexSync(BaseModel):
+    symbol: str
+    synced: int = 0
+    latest_date: Optional[str] = None
+    error: Optional[str] = None
+
+
+class PortfolioMarketDataRefreshResponse(BaseModel):
+    as_of: str
+    positions: PortfolioMarketDataPositionSync = Field(default_factory=PortfolioMarketDataPositionSync)
+    benchmark: Optional[PortfolioMarketDataIndexSync] = None

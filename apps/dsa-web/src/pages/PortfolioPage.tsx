@@ -3,14 +3,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Layers3, ShieldCheck } from 'lucide-react';
 import { Pie, PieChart, ResponsiveContainer, Tooltip, Legend, Cell } from 'recharts';
 import { decisionSignalsApi } from '../api/decisionSignals';
+import { paperTradingApi } from '../api/paperTrading';
 import { portfolioApi } from '../api/portfolio';
 import type { ParsedApiError } from '../api/error';
 import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert, StatusDot } from '../components/common';
 import { PortfolioSignalSummary } from '../components/decision-signals/DecisionSignalDisplay';
+import { PortfolioPerformancePanel } from '../components/portfolio/PortfolioPerformancePanel';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { formatUiText } from '../i18n/uiText';
-import { PORTFOLIO_TEXT } from '../locales/featureText';
+import { PAPER_TRADING_TEXT, PORTFOLIO_TEXT } from '../locales/featureText';
 import type { FxRefreshFeedback } from '../utils/portfolioFormat';
 import {
   buildFxRefreshFeedback,
@@ -34,6 +36,7 @@ import type {
   DecisionSignalItem,
   DecisionSignalMarket,
 } from '../types/decisionSignals';
+import type { PaperTradingRunResponse } from '../types/paperTrading';
 import type {
   PortfolioAccountItem,
   PortfolioCashDirection,
@@ -624,6 +627,7 @@ async function loadPortfolioSignalLookup(lookup: PortfolioSignalLookup): Promise
 const PortfolioPage: React.FC = () => {
   const { language, t } = useUiLanguage();
   const text = PORTFOLIO_TEXT[language];
+  const paperText = PAPER_TRADING_TEXT[language];
   const riskDashboardText = PORTFOLIO_RISK_DASHBOARD_TEXT[language];
   const decisionActionLabels = useMemo(() => buildDecisionActionLabelMap(t), [t]);
 
@@ -658,6 +662,10 @@ const PortfolioPage: React.FC = () => {
   const [portfolioSignalsWarning, setPortfolioSignalsWarning] = useState<string | null>(null);
   const [portfolioSignalsRefreshKey, setPortfolioSignalsRefreshKey] = useState(0);
   const portfolioSignalsRequestRef = useRef(0);
+  const [paperTradingRunning, setPaperTradingRunning] = useState<'dry' | 'apply' | null>(null);
+  const [paperTradingResult, setPaperTradingResult] = useState<PaperTradingRunResponse | null>(null);
+  const [paperTradingError, setPaperTradingError] = useState<string | null>(null);
+  const [paperTradingConfirmOpen, setPaperTradingConfirmOpen] = useState(false);
   const [positionAnalysisLoadingKey, setPositionAnalysisLoadingKey] = useState<string | null>(null);
   const [positionAnalysisMessage, setPositionAnalysisMessage] = useState<string | null>(null);
 
@@ -1311,6 +1319,28 @@ const PortfolioPage: React.FC = () => {
     setPortfolioSignalsRefreshKey((current) => current + 1);
   };
 
+  const runPaperTrading = async (dryRun: boolean) => {
+    if (paperTradingRunning) {
+      return;
+    }
+    setPaperTradingRunning(dryRun ? 'dry' : 'apply');
+    setPaperTradingError(null);
+    try {
+      const result = await paperTradingApi.run({
+        accountId: selectedAccount === 'all' ? undefined : selectedAccount,
+        dryRun,
+      });
+      setPaperTradingResult(result);
+      if (!dryRun) {
+        await handleRefresh();
+      }
+    } catch (err) {
+      setPaperTradingError(getParsedApiError(err).message);
+    } finally {
+      setPaperTradingRunning(null);
+    }
+  };
+
   const reloadSnapshotAndRiskForScope = useCallback(async (
     requestedViewKey: string,
     requestedRequestId: number,
@@ -1527,6 +1557,156 @@ const PortfolioPage: React.FC = () => {
           message={positionAnalysisMessage}
         />
       ) : null}
+
+      <Card padding="md">
+        <div className="mb-3 flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-foreground">{paperText.title}</h2>
+            <p className="mt-1 text-xs text-secondary">{paperText.description}</p>
+            <p className="mt-1 text-xs text-secondary">{paperText.accountHint}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="btn-secondary text-sm"
+              disabled={Boolean(paperTradingRunning)}
+              onClick={() => void runPaperTrading(true)}
+            >
+              {paperTradingRunning === 'dry' ? paperText.dryRunning : paperText.dryRun}
+            </button>
+            <button
+              type="button"
+              className="btn-primary text-sm"
+              disabled={Boolean(paperTradingRunning)}
+              onClick={() => setPaperTradingConfirmOpen(true)}
+            >
+              {paperTradingRunning === 'apply' ? paperText.applying : paperText.apply}
+            </button>
+          </div>
+        </div>
+        {paperTradingError ? (
+          <InlineAlert
+            variant="danger"
+            title={paperText.errorTitle}
+            message={paperTradingError}
+            className="mb-3 rounded-xl px-3 py-2 text-xs shadow-none"
+          />
+        ) : null}
+        {paperTradingResult === null ? (
+          <p className="text-xs text-secondary">{paperText.empty}</p>
+        ) : (
+          <div className="space-y-3">
+            <InlineAlert
+              variant={
+                paperTradingResult.status === 'executed'
+                  ? 'success'
+                  : paperTradingResult.status === 'planned'
+                    ? 'info'
+                    : paperTradingResult.status === 'duplicate_batch'
+                      ? 'danger'
+                      : 'warning'
+              }
+              message={paperTradingResult.message}
+              className="rounded-xl px-3 py-2 text-xs shadow-none"
+            />
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-secondary">
+              <span>
+                {paperText.status}: <Badge size="sm">{paperTradingResult.status}</Badge>
+              </span>
+              {paperTradingResult.batch ? (
+                <>
+                  <span>{paperText.signalDate}: {paperTradingResult.batch.signalDates.join(', ') || paperText.none}</span>
+                  <span>{paperText.fillDate}: {paperTradingResult.batch.fillDate}</span>
+                  <span>{paperText.referenceDate}: {paperTradingResult.batch.referenceDate}</span>
+                </>
+              ) : null}
+              {paperTradingResult.latestDataDate ? (
+                <span>{paperText.latestDataDate}: {paperTradingResult.latestDataDate}</span>
+              ) : null}
+              {paperTradingResult.portfolio ? (
+                <>
+                  <span>{paperText.cash}: {formatMoney(paperTradingResult.portfolio.cash)}</span>
+                  <span>{paperText.marketValue}: {formatMoney(paperTradingResult.portfolio.marketValue)}</span>
+                  <span>{paperText.equity}: {formatMoney(paperTradingResult.portfolio.equity)}</span>
+                  <span>{paperText.perName}: {formatMoney(paperTradingResult.portfolio.perName)}</span>
+                  <span>{paperText.cashAfterPlan}: {formatMoney(paperTradingResult.portfolio.cashAfterPlan)}</span>
+                </>
+              ) : null}
+            </div>
+            {paperTradingResult.warnings.length > 0 ? (
+              <ul className="list-disc space-y-1 pl-5 text-xs text-warning">
+                {paperTradingResult.warnings.map((warning) => (
+                  <li key={warning}>{warning}</li>
+                ))}
+              </ul>
+            ) : null}
+            {paperTradingResult.corporateActions.length > 0 ? (
+              <div className="space-y-1 text-xs text-secondary">
+                <div>{paperText.corporateActions}</div>
+                <ul className="list-disc space-y-1 pl-5">
+                  {paperTradingResult.corporateActions.map((action) => (
+                    <li key={action}>{action}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {paperTradingResult.items.length === 0 ? (
+              <p className="text-xs text-secondary">{paperText.noOrders}</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-[840px] w-full text-sm">
+                  <thead className="text-xs text-secondary border-b border-white/10">
+                    <tr>
+                      <th className="text-left py-2 pr-2">{paperText.side}</th>
+                      <th className="text-left py-2 pr-2">{paperText.code}</th>
+                      <th className="text-left py-2 pr-2">{paperText.name}</th>
+                      <th className="text-left py-2 pr-2">{paperText.action}</th>
+                      <th className="text-right py-2 pr-2">{paperText.score}</th>
+                      <th className="text-right py-2 pr-2">{paperText.quantity}</th>
+                      <th className="text-right py-2 pr-2">{paperText.price}</th>
+                      <th className="text-right py-2 pr-2">{paperText.referencePrice}</th>
+                      <th className="text-left py-2 pr-2">{paperText.status}</th>
+                      <th className="text-left py-2">{paperText.note}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paperTradingResult.items.map((item, index) => (
+                      <tr key={`${item.stockCode}-${item.side || 'none'}-${index}`} className="border-b border-white/5">
+                        <td className="py-2 pr-2">
+                          {item.side === 'buy' ? paperText.buy : item.side === 'sell' ? paperText.sell : paperText.none}
+                        </td>
+                        <td className="py-2 pr-2 font-mono text-foreground">{item.stockCode}</td>
+                        <td className="py-2 pr-2">{item.stockName || paperText.none}</td>
+                        <td className="py-2 pr-2">{item.action}</td>
+                        <td className="py-2 pr-2 text-right">{item.score ?? paperText.none}</td>
+                        <td className="py-2 pr-2 text-right">{item.quantity || paperText.none}</td>
+                        <td className="py-2 pr-2 text-right">
+                          {item.price != null ? item.price.toFixed(2) : paperText.none}
+                        </td>
+                        <td className="py-2 pr-2 text-right text-secondary">
+                          {item.referencePrice != null ? item.referencePrice.toFixed(2) : paperText.none}
+                        </td>
+                        <td className="py-2 pr-2">
+                          <Badge size="sm" variant={item.status === 'executed' ? 'success' : item.status === 'skipped' ? 'default' : 'warning'}>
+                            {item.status}
+                          </Badge>
+                        </td>
+                        <td className="py-2 text-xs text-secondary">{item.reason || paperText.none}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+      </Card>
+
+      <PortfolioPerformancePanel
+        accountId={queryAccountId ?? null}
+        costMethod={costMethod}
+        includeRealtime={false}
+      />
 
       {(showCreateAccount || !hasAccounts) ? (
         <Card padding="md">
@@ -2171,6 +2351,19 @@ const PortfolioPage: React.FC = () => {
           </div>
         </Card>
       </section>
+      <ConfirmDialog
+        isOpen={paperTradingConfirmOpen}
+        title={paperText.confirmTitle}
+        message={formatUiText(paperText.confirmMessage, { name: writableAccount?.name || paperText.title })}
+        confirmText={paperText.confirmText}
+        cancelText={paperText.cancelText}
+        confirmDisabled={Boolean(paperTradingRunning)}
+        onConfirm={() => {
+          setPaperTradingConfirmOpen(false);
+          void runPaperTrading(false);
+        }}
+        onCancel={() => setPaperTradingConfirmOpen(false)}
+      />
       <ConfirmDialog
         isOpen={Boolean(pendingDelete)}
         title="删除错误流水"

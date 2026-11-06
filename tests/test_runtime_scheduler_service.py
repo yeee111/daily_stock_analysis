@@ -75,6 +75,20 @@ class _FakeScheduleModule:
             self.jobs.remove(job)
 
 
+def _run_job_at(schedule_module, at_time: str) -> None:
+    """Run only the job registered at ``at_time``.
+
+    ``run_pending`` fires every registered job, including the independent
+    paper-trading group added in Phase 1; tests that care about the analysis
+    callback must not wait on those.
+    """
+    for job in list(schedule_module.jobs):
+        if job.at_time == at_time:
+            job.job_func()
+            return
+    raise AssertionError(f"no scheduled job at {at_time}")
+
+
 class _NoopThread:
     def __init__(self, target=None, **kwargs):
         self.target = target
@@ -160,7 +174,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         worker._run_analysis_locked.return_value = True
         worker._last_error = None
         worker._last_skip_reason = "scheduled_occurrence_already_claimed"
-        with patch("src.services.runtime_scheduler.os.setsid"), patch(
+        # setsid only exists on POSIX; create=True keeps this behaviour test
+        # runnable on Windows, where the worker never calls it.
+        with patch("src.services.runtime_scheduler.os.setsid", create=True), patch(
             "src.services.runtime_scheduler.RuntimeSchedulerService", return_value=worker,
         ) as service_type:
             _run_scheduled_analysis_process(queue, None, {"_scheduled_for": due.isoformat(), "no_notify": True})
@@ -313,6 +329,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertIsNone(status["last_error"])
 
     def test_blocked_scheduled_analysis_times_out_and_allows_next_run(self) -> None:
+        self.enterContext(
+            patch.dict(os.environ, {"PAPER_TRADING_AUTO_RUN": "false"}, clear=False)
+        )
         fake_schedule = _FakeScheduleModule()
         config = SimpleNamespace(
             schedule_enabled=True,
@@ -335,7 +354,7 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
 
         callback_returned = threading.Event()
         trigger = threading.Thread(
-            target=lambda: (fake_schedule.run_pending(), callback_returned.set()),
+            target=lambda: (_run_job_at(fake_schedule, "18:00"), callback_returned.set()),
             daemon=True,
         )
         _BLOCKING_THREAD_RELEASE.clear()
@@ -589,6 +608,9 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         self.assertEqual(captured.exception.detail["reason"], "analysis_already_running")
 
     def test_reconcile_replaces_daily_jobs_without_triggering_old_jobs(self) -> None:
+        self.enterContext(
+            patch.dict(os.environ, {"PAPER_TRADING_AUTO_RUN": "false"}, clear=False)
+        )
         fake_schedule = _FakeScheduleModule()
         config = SimpleNamespace(
             schedule_enabled=True,
@@ -616,15 +638,21 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         ):
             service.reconcile_from_config()
             old_jobs = fake_schedule.get_jobs()
-            self.assertEqual([job.at_time for job in old_jobs], ["09:20"])
+            self.assertEqual(
+                [job.at_time for job in old_jobs],
+                ["09:20", "18:05", "19:00"],
+            )
 
             config.schedule_times = ["15:10"]
             service.reconcile_from_config()
 
-            self.assertEqual([job.at_time for job in fake_schedule.get_jobs()], ["15:10"])
+            self.assertEqual(
+                [job.at_time for job in fake_schedule.get_jobs()],
+                ["15:10", "18:05", "19:00"],
+            )
             self.assertNotIn(old_jobs[0], fake_schedule.get_jobs())
 
-            fake_schedule.run_pending()
+            _run_job_at(fake_schedule, "15:10")
 
         self.assertEqual(calls, ["run"])
 
@@ -681,11 +709,28 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 self.background_tasks = []
                 self.daily_task = None
                 self.daily_task_run_immediately = None
+                self.extra_daily_tasks = []
                 self._jobs = []
 
             def set_daily_task(self, task, run_immediately: bool) -> None:
                 self.daily_task = task
                 self.daily_task_run_immediately = run_immediately
+
+            def add_daily_task(
+                self,
+                task,
+                *,
+                schedule_times=None,
+                schedule_times_provider=None,
+                fallback_time: str = "18:00",
+                name: str = "extra",
+            ) -> None:
+                self.extra_daily_tasks.append({
+                    "task": task,
+                    "schedule_times": schedule_times,
+                    "schedule_times_provider": schedule_times_provider,
+                    "name": name,
+                })
 
             def add_background_task(
                 self,
@@ -761,12 +806,29 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
                 self.background_tasks = []
                 self.daily_task = None
                 self.daily_task_run_immediately = None
+                self.extra_daily_tasks = []
                 self._jobs = []
                 schedulers.append(self)
 
             def set_daily_task(self, task, run_immediately: bool) -> None:
                 self.daily_task = task
                 self.daily_task_run_immediately = run_immediately
+
+            def add_daily_task(
+                self,
+                task,
+                *,
+                schedule_times=None,
+                schedule_times_provider=None,
+                fallback_time: str = "18:00",
+                name: str = "extra",
+            ) -> None:
+                self.extra_daily_tasks.append({
+                    "task": task,
+                    "schedule_times": schedule_times,
+                    "schedule_times_provider": schedule_times_provider,
+                    "name": name,
+                })
 
             def add_background_task(
                 self,
@@ -864,7 +926,10 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             config.schedule_times = ["15:10"]
             service.reconcile_from_config()
             self.assertTrue(service.status()["enabled"])
-            self.assertEqual([job.at_time for job in fake_schedule.get_jobs()], ["15:10"])
+            self.assertEqual(
+                [job.at_time for job in fake_schedule.get_jobs()],
+                ["15:10", "18:05", "19:00"],
+            )
 
             service.reconcile_from_config(clear_enabled_override=True)
             self.assertFalse(service.status()["enabled"])
@@ -1119,6 +1184,145 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
             ("reconcile", True, False),
             ("stop",),
         ])
+
+
+class PaperTradingScheduleTestCase(unittest.TestCase):
+    """Independent paper-trading trigger, decoupled from the analysis schedule."""
+
+    @staticmethod
+    def _service():
+        return RuntimeSchedulerService(config_provider=lambda: SimpleNamespace())
+
+    def test_schedule_times_default_and_env_override(self) -> None:
+        service = self._service()
+
+        with patch.dict(os.environ, {"PAPER_TRADING_SCHEDULE_TIMES": ""}, clear=False):
+            self.assertEqual(
+                service._paper_trading_schedule_times(), ["18:05", "19:00"]
+            )
+
+        with patch.dict(
+            os.environ, {"PAPER_TRADING_SCHEDULE_TIMES": "21:30, 07:05"}, clear=False
+        ):
+            self.assertEqual(
+                service._paper_trading_schedule_times(), ["07:05", "21:30"]
+            )
+
+    def test_start_registers_independent_daily_task(self) -> None:
+        fake_schedule = _FakeScheduleModule()
+        config = SimpleNamespace(
+            schedule_enabled=True,
+            schedule_time="18:00",
+            schedule_times=["18:00"],
+        )
+        service = RuntimeSchedulerService(config_provider=lambda: config)
+        service._reload_config = lambda: config
+
+        with patch.dict(
+            os.environ, {"PAPER_TRADING_SCHEDULE_TIMES": ""}, clear=False
+        ), patch.dict(sys.modules, {"schedule": fake_schedule}), patch(
+            "src.services.runtime_scheduler.threading.Thread",
+            _NoopThread,
+        ):
+            service.start()
+
+        self.assertEqual(
+            [job.at_time for job in fake_schedule.jobs],
+            ["18:00", "18:05", "19:00"],
+        )
+        self.assertEqual(service.status()["paper_trading_schedule_times"], ["18:05", "19:00"])
+
+    def test_schedule_callback_runs_paper_trading(self) -> None:
+        service = self._service()
+
+        with patch(
+            "src.services.paper_trading_service.maybe_run_after_analysis"
+        ) as hook:
+            service._run_paper_trading_schedule()
+
+        hook.assert_called_once_with(trigger="paper_trading_schedule")
+
+
+class WatchdogOutcomeCollectionTestCase(unittest.TestCase):
+    """Every watchdog exit must collect the paper-trading pass exactly once."""
+
+    @staticmethod
+    def _service():
+        return RuntimeSchedulerService(config_provider=lambda: SimpleNamespace())
+
+    def test_paper_hook_fires_once_per_outcome(self) -> None:
+        from src.services.runtime_scheduler import (
+            ANALYSIS_OUTCOME_FAILED,
+            ANALYSIS_OUTCOME_GENERATION_ABORTED,
+            ANALYSIS_OUTCOME_SKIPPED,
+            ANALYSIS_OUTCOME_SUCCESS,
+            ANALYSIS_OUTCOME_TIMEOUT,
+            ANALYSIS_OUTCOME_WATCHDOG_ERROR,
+            ANALYSIS_OUTCOME_WORKER_LOST,
+            PAPER_TRADING_TRIGGER_OUTCOMES,
+        )
+
+        outcomes = [
+            ANALYSIS_OUTCOME_SUCCESS,
+            ANALYSIS_OUTCOME_SKIPPED,
+            ANALYSIS_OUTCOME_FAILED,
+            ANALYSIS_OUTCOME_TIMEOUT,
+            ANALYSIS_OUTCOME_WORKER_LOST,
+            ANALYSIS_OUTCOME_WATCHDOG_ERROR,
+            ANALYSIS_OUTCOME_GENERATION_ABORTED,
+        ]
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                service = self._service()
+                with patch.object(
+                    service, "_execute_scheduled_analysis", return_value=outcome
+                ), patch.object(service, "_run_screening_signal_bridge") as bridge, patch.object(
+                    service, "_run_paper_trading_after_analysis"
+                ) as paper:
+                    service._run_analysis_with_watchdog()
+                if outcome in PAPER_TRADING_TRIGGER_OUTCOMES:
+                    paper.assert_called_once_with(outcome=outcome)
+                else:
+                    paper.assert_not_called()
+                if outcome == ANALYSIS_OUTCOME_SUCCESS:
+                    bridge.assert_called_once_with()
+                else:
+                    bridge.assert_not_called()
+                self.assertFalse(service._run_lock.locked())
+
+    def test_watchdog_exception_collects_as_watchdog_error(self) -> None:
+        service = self._service()
+        with patch.object(
+            service,
+            "_execute_scheduled_analysis",
+            side_effect=RuntimeError("boom"),
+        ), patch.object(service, "_run_paper_trading_after_analysis") as paper:
+            service._run_analysis_with_watchdog()
+
+        paper.assert_called_once_with(outcome="watchdog_error")
+        self.assertIn("boom", service.status()["last_error"])
+        self.assertFalse(service._run_lock.locked())
+
+    def test_busy_lock_skips_collection(self) -> None:
+        service = self._service()
+        self.assertTrue(service._run_lock.acquire(blocking=False))
+        try:
+            with patch.object(service, "_run_paper_trading_after_analysis") as paper:
+                service._run_analysis_with_watchdog()
+        finally:
+            service._run_lock.release()
+
+        paper.assert_not_called()
+
+    def test_stale_generation_is_reported_not_collected(self) -> None:
+        service = self._service()
+        with patch.object(service, "_run_paper_trading_after_analysis") as paper:
+            accepted = service._start_analysis_watchdog(
+                generation=service._analysis_generation - 1
+            )
+
+        self.assertFalse(accepted)
+        paper.assert_not_called()
 
 
 if __name__ == "__main__":

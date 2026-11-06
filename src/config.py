@@ -16,7 +16,7 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Literal, Mapping, Optional, Tuple
 from urllib.parse import unquote, urlparse
 from dotenv import load_dotenv, dotenv_values
 from dataclasses import dataclass, field
@@ -948,7 +948,14 @@ def setup_env(override: bool = False):
     preexisting_compose_sensitive_keys = {
         key for key in compose_sensitive_keys if key in os.environ
     }
+    priority_keys = Config._WEBUI_RUNTIME_ENV_FILE_PRIORITY_KEYS
+    dotenv_before = {key: os.environ.get(key) for key in priority_keys}
     load_dotenv(dotenv_path=env_path, override=override)
+    if not Config._BOOTSTRAP_DOTENV_SNAPSHOT_FROZEN:
+        for key, before in dotenv_before.items():
+            after = os.environ.get(key)
+            if after is not None and after != before:
+                Config._BOOTSTRAP_DOTENV_VALUE_SNAPSHOT[key] = after
     try:
         raw_env_values = dotenv_values(env_path, interpolate=False)
     except Exception as exc:  # pragma: no cover - defensive branch
@@ -1007,6 +1014,12 @@ class Config:
 
     # === Built-in stock screening ===
     screening_enabled: bool = False
+    screening_signal_bridge_enabled: bool = False
+    screening_signal_strategy: str = "momentum_quality"
+    screening_signal_market: str = "cn"
+    screening_signal_max_results: int = 15
+    screening_signal_buy_top_n: int = 10
+    screening_signal_horizon: str = "3d"
 
     # === AI 分析配置 ===
     generation_backend: str = LITELLM_BACKEND_ID
@@ -1375,6 +1388,10 @@ class Config:
     portfolio_risk_stop_loss_near_ratio: float = 0.8
     portfolio_risk_lookback_days: int = 180
     portfolio_fx_update_enabled: bool = True
+    # 业绩看板基准指数代码；留空则不做基准对比
+    portfolio_performance_benchmark_symbol: str = "000300"
+    # 基准指数本地缺日线时，是否允许业绩看板自动回源补齐
+    portfolio_market_data_sync_enabled: bool = True
 
     # Discord 机器人状态
     discord_bot_status: str = "A股智能分析 | /help"
@@ -1450,6 +1467,14 @@ class Config:
     _BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = False
     _BOOTSTRAP_RUNTIME_ENV_OVERRIDES = frozenset()
     _BOOTSTRAP_RUNTIME_ENV_PRESENT_KEYS = frozenset()
+    # Values that ``setup_env()`` itself injected into ``os.environ`` from a
+    # ``.env`` file. ``reset_instance()`` clears the eager capture above, so a
+    # later lazy capture would otherwise mistake these stale values for explicit
+    # process overrides when ``ENV_FILE`` points at a different file. Only the
+    # bootstrap load (before the first ``reset_instance``) is recorded; later
+    # loads are not, so tests that re-point ``ENV_FILE`` stay isolated.
+    _BOOTSTRAP_DOTENV_VALUE_SNAPSHOT: ClassVar[Dict[str, str]] = {}
+    _BOOTSTRAP_DOTENV_SNAPSHOT_FROZEN: ClassVar[bool] = False
 
     def __post_init__(self) -> None:
         _log = logging.getLogger(__name__)
@@ -2458,7 +2483,42 @@ class Config:
                 minimum=1,
             ),
             portfolio_fx_update_enabled=os.getenv('PORTFOLIO_FX_UPDATE_ENABLED', 'true').lower() == 'true',
+            portfolio_performance_benchmark_symbol=(
+                os.getenv('PORTFOLIO_PERFORMANCE_BENCHMARK_SYMBOL', '000300').strip()
+            ),
+            portfolio_market_data_sync_enabled=parse_env_bool(
+                os.getenv('PORTFOLIO_MARKET_DATA_SYNC_ENABLED'),
+                default=True,
+            ),
             screening_enabled=parse_env_bool(os.getenv('SCREENING_ENABLED'), default=False),
+            screening_signal_bridge_enabled=parse_env_bool(
+                os.getenv('SCREENING_SIGNAL_BRIDGE'),
+                default=False,
+            ),
+            screening_signal_strategy=(
+                os.getenv('SCREENING_SIGNAL_STRATEGY', 'momentum_quality').strip()
+                or 'momentum_quality'
+            ),
+            screening_signal_market=(
+                os.getenv('SCREENING_SIGNAL_MARKET', 'cn').strip().lower() or 'cn'
+            ),
+            screening_signal_max_results=parse_env_int(
+                os.getenv('SCREENING_SIGNAL_MAX_RESULTS'),
+                15,
+                field_name='SCREENING_SIGNAL_MAX_RESULTS',
+                minimum=1,
+                maximum=50,
+            ),
+            screening_signal_buy_top_n=parse_env_int(
+                os.getenv('SCREENING_SIGNAL_BUY_TOP_N'),
+                10,
+                field_name='SCREENING_SIGNAL_BUY_TOP_N',
+                minimum=0,
+                maximum=50,
+            ),
+            screening_signal_horizon=(
+                os.getenv('SCREENING_SIGNAL_HORIZON', '3d').strip().lower() or '3d'
+            ),
         )
     
     @classmethod
@@ -3004,6 +3064,9 @@ class Config:
             env_value = os.environ.get(key)
             if env_value is None:
                 continue
+            if cls._BOOTSTRAP_DOTENV_VALUE_SNAPSHOT.get(key) == env_value:
+                # Injected by a .env load, not provided by the runtime.
+                continue
 
             present_keys.add(key)
             file_value = cls._get_env_file_value(key)
@@ -3178,6 +3241,7 @@ class Config:
         cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES_CAPTURED = False
         cls._BOOTSTRAP_RUNTIME_ENV_OVERRIDES = frozenset()
         cls._BOOTSTRAP_RUNTIME_ENV_PRESENT_KEYS = frozenset()
+        cls._BOOTSTRAP_DOTENV_SNAPSHOT_FROZEN = True
 
     def has_searxng_enabled(self) -> bool:
         """Whether SearXNG fallback is enabled via self-hosted or public mode."""

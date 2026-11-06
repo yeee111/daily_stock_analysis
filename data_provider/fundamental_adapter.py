@@ -281,6 +281,83 @@ def _build_dividend_payload(
     }
 
 
+def _corporate_action_components(row: pd.Series) -> Tuple[float, float]:
+    """Return ``(cash per 10 shares, bonus + transfer shares per 10 shares)``.
+
+    The three AkShare dividend endpoints use different column layouts, so match
+    exact column names instead of keywords ("派息" would otherwise hit "派息日").
+    """
+    columns = {str(column) for column in row.index}
+
+    def amount(name: str) -> float:
+        value = _safe_float(row.get(name))
+        return value if value is not None and math.isfinite(value) else 0.0
+
+    if "现金分红-现金分红比例" in columns or "送转股份-送转总比例" in columns:
+        return amount("现金分红-现金分红比例"), amount("送转股份-送转总比例")
+    if "派息比例" in columns:
+        return amount("派息比例"), amount("送股比例") + amount("转增比例")
+    if "派息" in columns:
+        return amount("派息"), amount("送股") + amount("转增")
+    return 0.0, 0.0
+
+
+def _build_corporate_action_events(
+    dividend_df: pd.DataFrame,
+    stock_code: str,
+    *,
+    max_events: int = 20,
+    today: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize implemented dividend/split events for position accounting.
+
+    Amounts are converted from the providers' "per 10 shares" convention to a
+    per-share cash amount and a share multiplier (10送转3 → 1.3). Events without
+    an ex-dividend date or not yet implemented are skipped.
+    """
+    work_df = _filter_rows_by_code(dividend_df, stock_code)
+    if work_df.empty:
+        return []
+
+    now_date = (today or datetime.now()).date()
+    seen = set()
+    events: List[Dict[str, Any]] = []
+    for _, row in work_df.iterrows():
+        if not isinstance(row, pd.Series):
+            continue
+        ex_dt = _safe_datetime(_pick_by_keywords(row, _DIVIDEND_KEYWORD_MAP["ex_dividend_date"]))
+        if ex_dt is None:
+            continue
+        ex_date = ex_dt.date()
+        if ex_date > now_date:
+            continue
+        progress = _safe_str(_pick_by_keywords(row, ["方案进度", "进度"]))
+        if progress and "实施" not in progress:
+            continue
+
+        cash_per_10, split_per_10 = _corporate_action_components(row)
+        cash_per_share = round(cash_per_10 / 10.0, 6)
+        split_ratio = round(1.0 + split_per_10 / 10.0, 6)
+        if cash_per_share <= 0 and abs(split_ratio - 1.0) < 1e-9:
+            continue
+
+        key = (ex_date.isoformat(), cash_per_share, split_ratio)
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(
+            {
+                "ex_dividend_date": ex_date.isoformat(),
+                "cash_dividend_per_share": cash_per_share,
+                "split_ratio": split_ratio,
+                "is_pre_tax": True,
+            }
+        )
+
+    events.sort(key=lambda item: item["ex_dividend_date"], reverse=True)
+    return events[:max(1, max_events)]
+
+
 def _extract_latest_row(df: pd.DataFrame, stock_code: str) -> Optional[pd.Series]:
     """
     Select the most relevant row for the given stock.
@@ -368,6 +445,32 @@ class AkshareFundamentalAdapter:
                 errors.append(f"{func_name}:{type(exc).__name__}")
                 continue
         return None, None, errors
+
+    def get_dividend_events(self, stock_code: str, *, max_events: int = 20) -> List[Dict[str, Any]]:
+        """Return implemented cash-dividend / split events for an A-share code.
+
+        Unlike ``get_fundamental_bundle`` this only hits the dividend tables, so
+        callers that need corporate actions (paper trading) do not pay for
+        financial abstracts, forecasts or shareholder lookups. Fail-open: any
+        provider error yields an empty list.
+        """
+        try:
+            code = _normalize_code(stock_code)
+            # All three candidates are per-symbol tables that carry no code
+            # column, so requesting code filtering would reject every one of them.
+            dividend_df, _source, _errors = self._call_df_candidates(
+                [
+                    ("stock_fhps_detail_em", {"symbol": code}),
+                    ("stock_history_dividend_detail", {"symbol": code, "indicator": "分红", "date": ""}),
+                    ("stock_dividend_cninfo", {"symbol": code}),
+                ]
+            )
+            if dividend_df is None or dividend_df.empty:
+                return []
+            return _build_corporate_action_events(dividend_df, code, max_events=max_events)
+        except Exception as exc:  # noqa: BLE001 - adapter contract is fail-open
+            logger.warning("[Dividend] failed(%s): %s", stock_code, exc)
+            return []
 
     def get_fundamental_bundle(self, stock_code: str) -> Dict[str, Any]:
         """
