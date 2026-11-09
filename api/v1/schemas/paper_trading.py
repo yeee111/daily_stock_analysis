@@ -84,6 +84,39 @@ class PaperTradingPortfolio(BaseModel):
     cash_after_plan: float = 0.0
 
 
+class PaperTradingNoStopPosition(BaseModel):
+    code: str
+    quantity: int = 0
+    last_price: Optional[float] = None
+    signal_id: Optional[int] = None
+    target_price: Optional[float] = None
+
+
+class PaperTradingStopDistance(BaseModel):
+    code: str
+    last_price: Optional[float] = None
+    stop_loss: float
+    distance_pct: Optional[float] = Field(
+        None,
+        description="止损价相对现价的百分比距离（负值=止损在现价下方）；缺估值价时为 null",
+    )
+
+
+class PaperTradingPositionHealth(BaseModel):
+    as_of: str
+    held_names: int = 0
+    covered_names: int = 0
+    no_stop_positions: List[PaperTradingNoStopPosition] = Field(
+        default_factory=list,
+        description="建仓信号没有 stop_loss 的持仓（无止损保护）",
+    )
+    stop_distances: List[PaperTradingStopDistance] = Field(default_factory=list)
+    distance_distribution: Dict[str, int] = Field(
+        default_factory=dict,
+        description="按 |距离| 分桶：within_3pct / between_3_5pct / between_5_8pct / over_8pct / unknown_price",
+    )
+
+
 class PaperTradingRunResponse(BaseModel):
     status: str
     dry_run: bool = True
@@ -100,4 +133,8 @@ class PaperTradingRunResponse(BaseModel):
     corporate_actions: List[str] = Field(
         default_factory=list,
         description="本次运行自动登记的分红/送转事件（人类可读）",
+    )
+    position_health: Optional[PaperTradingPositionHealth] = Field(
+        None,
+        description="持仓止损体检：无止损保护仓位清单与止损距离分布（每次运行自动附带）",
     )

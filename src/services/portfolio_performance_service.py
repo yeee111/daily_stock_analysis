@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from datetime import date, timedelta
@@ -14,6 +15,7 @@ from sqlalchemy import func, select
 from src.config import Config, get_config
 from src.repositories.portfolio_repo import PortfolioRepository
 from src.repositories.stock_repo import StockRepository
+from src.services.decision_signal_service import DecisionSignalService
 from src.services.market_data_sync_service import MarketDataSyncService, index_canonical_id
 from src.services.portfolio_risk_service import PortfolioRiskService
 from src.services.portfolio_service import PortfolioService
@@ -29,6 +31,25 @@ EPS = 1e-9
 _BENCHMARK_SYNC_RETRY_SECONDS = 300
 _benchmark_sync_attempts: Dict[Tuple[str, date, date], float] = {}
 _benchmark_sync_attempts_lock = threading.Lock()
+
+_SIGNAL_NOTE_RE = re.compile(r"signal #(\d+)")
+EXIT_REASON_LABELS = {
+    "take_profit": "止盈触发",
+    "stop_loss": "止损触发",
+    "signal_sell": "信号清仓",
+    "signal_reduce": "信号减仓",
+    "level_exit": "止盈止损（信号缺失）",
+    "manual": "手动/其他",
+    "unknown": "无法判断（信号缺失）",
+}
+EXIT_REASON_ORDER = tuple(EXIT_REASON_LABELS)
+EXIT_VERDICT_LABELS = {
+    "locked_gain": "落袋正确（卖后回落）",
+    "sold_early": "卖飞（卖后继续涨）",
+    "avoided_loss": "躲对下跌（卖后继续跌）",
+    "sold_low": "卖在低点（卖后反弹）",
+    "breakeven": "平盘退出",
+}
 
 
 class PortfolioPerformanceService:
@@ -47,6 +68,7 @@ class PortfolioPerformanceService:
         stock_repo: Optional[StockRepository] = None,
         config: Optional[Config] = None,
         market_data_sync: Optional[MarketDataSyncService] = None,
+        signal_service: Optional[DecisionSignalService] = None,
     ):
         self.repo = repo or PortfolioRepository()
         self.portfolio_service = portfolio_service or PortfolioService(repo=self.repo)
@@ -58,6 +80,7 @@ class PortfolioPerformanceService:
         self.stock_repo = stock_repo
         self.config = config or get_config()
         self.market_data_sync = market_data_sync or MarketDataSyncService()
+        self.signal_service = signal_service
 
     def get_performance_report(
         self,
@@ -140,6 +163,268 @@ class PortfolioPerformanceService:
             "benchmark": benchmark,
             "notes": notes,
         }
+
+    def get_sell_review(
+        self,
+        *,
+        account_id: Optional[int] = None,
+        as_of: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Exit attribution for every closed round trip: why it was sold,
+        what the entry thesis was, and how the price moved after the sell.
+
+        Read-only: FIFO pairing is shared with the performance report, exit
+        reasons are recovered from the trade uid/note plus the referenced
+        signal, and post-sell drift only reads local daily bars.
+        """
+        as_of_date = as_of or date.today()
+        trades = self._fetch_trades(account_id=account_id, as_of=as_of_date)
+        round_trips, _ = self._match_round_trips(trades)
+        signals = self.signal_service or DecisionSignalService()
+        signal_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+
+        def signal_of(note: Any) -> Optional[Dict[str, Any]]:
+            match = _SIGNAL_NOTE_RE.search(str(note or ""))
+            if not match:
+                return None
+            signal_id = int(match.group(1))
+            if signal_id not in signal_cache:
+                try:
+                    signal_cache[signal_id] = signals.get_signal(signal_id) or None
+                except Exception:  # noqa: BLE001 - a deleted signal must not break the review
+                    signal_cache[signal_id] = None
+            return signal_cache[signal_id]
+
+        stock_repo = self.stock_repo or StockRepository()
+        items = [
+            self._sell_review_item(trip, signal_of=signal_of, stock_repo=stock_repo)
+            for trip in round_trips
+        ]
+        items.sort(key=lambda row: (row["close_date"], row["stock_code"]), reverse=True)
+
+        closed = self._summarize_closed(round_trips)
+        by_reason: List[Dict[str, Any]] = []
+        for reason in EXIT_REASON_ORDER:
+            group = [row for row in items if row["exit_reason"] == reason]
+            if not group:
+                continue
+            wins = sum(1 for row in group if row["pnl"] > EPS)
+            returns = [row["return_pct"] for row in group if row["return_pct"] is not None]
+            by_reason.append(
+                {
+                    "reason": reason,
+                    "label": EXIT_REASON_LABELS[reason],
+                    "count": len(group),
+                    "wins": wins,
+                    "losses": sum(1 for row in group if row["pnl"] < -EPS),
+                    "win_rate_pct": round(wins / len(group) * 100.0, 2),
+                    "total_pnl": round(sum(row["pnl"] for row in group), 2),
+                    "avg_return_pct": round(sum(returns) / len(returns), 2) if returns else None,
+                    "avg_holding_days": round(
+                        sum(row["holding_days"] for row in group) / len(group), 1
+                    ),
+                }
+            )
+
+        verdicts = [row["exit_verdict"] for row in items if row["exit_verdict"]]
+        exit_quality = {"evaluated": len(verdicts)}
+        for code in EXIT_VERDICT_LABELS:
+            exit_quality[code] = verdicts.count(code)
+
+        winners = [row for row in items if row["pnl"] > EPS]
+        losses = [row for row in items if row["pnl"] < -EPS]
+        top_winners = sorted(
+            winners,
+            key=lambda row: row["return_pct"] if row["return_pct"] is not None else float("-inf"),
+            reverse=True,
+        )[:3]
+        top_losers = sorted(
+            losses,
+            key=lambda row: row["return_pct"] if row["return_pct"] is not None else float("inf"),
+        )[:3]
+
+        notes: List[str] = []
+        if not items:
+            notes.append("尚无已平仓交易，卖出复盘为空")
+        elif len(items) < _MIN_CLOSED_TRADES_FOR_STATS:
+            notes.append(
+                f"已平仓仅 {len(items)} 笔（< {_MIN_CLOSED_TRADES_FOR_STATS} 笔），结论仅供方向性参考"
+            )
+        pending = len(items) - exit_quality["evaluated"]
+        if pending > 0:
+            notes.append(f"{pending} 笔卖出后本地日线不足，卖后走势待数据积累")
+        notes.append(
+            "退出原因按成交 uid（-exit 为止盈止损委托）与信号回读判定；"
+            "卖后走势对比本地前复权日线，若期间除权除息可能有偏差"
+        )
+
+        return {
+            "as_of": as_of_date.isoformat(),
+            "account_id": account_id,
+            "summary": {
+                "count": closed["count"],
+                "wins": closed["wins"],
+                "losses": closed["losses"],
+                "win_rate_pct": closed["win_rate_pct"],
+                "realized_pnl": closed["realized_pnl"],
+                "avg_return_pct": closed["avg_return_pct"],
+                "avg_holding_days": closed["avg_holding_days"],
+            },
+            "by_reason": by_reason,
+            "exit_quality": exit_quality,
+            "top_winners": top_winners,
+            "top_losers": top_losers,
+            "items": items,
+            "notes": notes,
+        }
+
+    def _sell_review_item(
+        self,
+        trip: Dict[str, Any],
+        *,
+        signal_of: Any,
+        stock_repo: StockRepository,
+    ) -> Dict[str, Any]:
+        sell_note = str(trip.get("sell_note") or "")
+        sell_signal = signal_of(sell_note)
+        entry_signal = None
+        for note in trip.get("open_notes") or []:
+            entry_signal = signal_of(note)
+            if entry_signal is not None:
+                break
+        reason = self._classify_exit(
+            uid=str(trip.get("sell_trade_uid") or ""),
+            signal=sell_signal,
+            price=float(trip.get("avg_price") or 0.0),
+            has_signal_ref=bool(_SIGNAL_NOTE_RE.search(sell_note)),
+        )
+        level_signal = entry_signal or sell_signal or {}
+        drift = self._post_sell_drift(
+            stock_repo=stock_repo,
+            code=str(trip["stock_code"]),
+            close_date=date.fromisoformat(trip["close_date"]),
+            sell_price=float(trip.get("avg_price") or 0.0),
+        )
+        verdict, horizon = self._exit_verdict(pnl=float(trip["pnl"]), drift=drift)
+        entry_reason = str((entry_signal or {}).get("reason") or "").strip()
+        return {
+            "stock_code": trip["stock_code"],
+            "stock_name": (entry_signal or sell_signal or {}).get("stock_name"),
+            "market": trip["market"],
+            "open_date": trip["open_date"],
+            "close_date": trip["close_date"],
+            "holding_days": trip["holding_days"],
+            "quantity": trip["quantity"],
+            "avg_cost": trip["avg_cost"],
+            "avg_price": trip["avg_price"],
+            "pnl": trip["pnl"],
+            "return_pct": trip["return_pct"],
+            "exit_reason": reason,
+            "exit_reason_label": EXIT_REASON_LABELS[reason],
+            "entry_signal_id": (entry_signal or {}).get("id"),
+            "entry_score": (entry_signal or {}).get("score"),
+            "entry_reason": entry_reason[:160] or None,
+            "stop_loss": self._positive_level(level_signal.get("stop_loss")),
+            "target_price": self._positive_level(level_signal.get("target_price")),
+            **drift,
+            "exit_verdict": verdict,
+            "exit_verdict_label": EXIT_VERDICT_LABELS.get(verdict) if verdict else None,
+            "verdict_horizon": horizon,
+        }
+
+    @staticmethod
+    def _positive_level(value: Any) -> Optional[float]:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if number > 0 else None
+
+    @classmethod
+    def _classify_exit(
+        cls,
+        *,
+        uid: str,
+        signal: Optional[Dict[str, Any]],
+        price: float,
+        has_signal_ref: bool,
+    ) -> str:
+        """Recover the exit mechanism from the fill, not from a stored label.
+
+        Resting stop/target sells carry the ``-exit`` uid tag and reference the
+        signal that opened the position; the fill side of the level separates
+        stop-loss from take-profit (a stop fills at or below the stop, a target
+        at or above the target, modulo slippage which only hurts the fill).
+        """
+        action = str((signal or {}).get("action") or "").strip().lower()
+        if uid.endswith("-exit") or action in {"buy", "add"}:
+            stop = cls._positive_level((signal or {}).get("stop_loss"))
+            target = cls._positive_level((signal or {}).get("target_price"))
+            if stop is not None and price <= stop + 1e-6:
+                return "stop_loss"
+            if target is not None:
+                return "take_profit"
+            if stop is not None:
+                return "stop_loss"
+            return "level_exit"
+        if action in {"sell", "avoid"}:
+            return "signal_sell"
+        if action in {"reduce", "alert"}:
+            return "signal_reduce"
+        if not has_signal_ref:
+            return "manual"
+        return "unknown"
+
+    @staticmethod
+    def _post_sell_drift(
+        *,
+        stock_repo: StockRepository,
+        code: str,
+        close_date: date,
+        sell_price: float,
+    ) -> Dict[str, Any]:
+        rows = stock_repo.get_range(
+            code, close_date + timedelta(days=1), close_date + timedelta(days=45)
+        ) or []
+        bars = sorted(
+            (
+                row
+                for row in rows
+                if getattr(row, "date", None) is not None
+                and row.date > close_date
+                and getattr(row, "close", None)
+                and float(row.close) > 0
+            ),
+            key=lambda row: row.date,
+        )
+        result: Dict[str, Any] = {"post_sell_sessions": len(bars)}
+        for horizon in (5, 10, 20):
+            key = f"post_sell_{horizon}d_pct"
+            if len(bars) >= horizon and sell_price > 0:
+                result[key] = round(
+                    (float(bars[horizon - 1].close) / sell_price - 1.0) * 100.0, 2
+                )
+            else:
+                result[key] = None
+        return result
+
+    @staticmethod
+    def _exit_verdict(
+        *, pnl: float, drift: Dict[str, Any]
+    ) -> Tuple[Optional[str], Optional[int]]:
+        """Judge the exit on the longest post-sell window available locally."""
+        for horizon in (20, 10, 5):
+            value = drift.get(f"post_sell_{horizon}d_pct")
+            if value is None:
+                continue
+            if pnl > EPS:
+                verdict = "locked_gain" if value < 0 else "sold_early"
+            elif pnl < -EPS:
+                verdict = "avoided_loss" if value < 0 else "sold_low"
+            else:
+                verdict = "breakeven"
+            return verdict, horizon
+        return None, None
 
     # ------------------------------------------------------------------
     # Data access
@@ -271,6 +556,7 @@ class PortfolioPerformanceService:
                         "remaining_quantity": quantity,
                         "unit_cost": (quantity * price + fee + tax) / quantity,
                         "currency": str(trade.currency or "CNY"),
+                        "note": str(trade.note or ""),
                     }
                 )
                 continue
@@ -283,12 +569,15 @@ class PortfolioPerformanceService:
             cost_basis = 0.0
             open_date = trade.trade_date
             currency = str(trade.currency or "CNY")
+            open_notes: List[str] = []
             while remaining > EPS and bucket:
                 lot = bucket[0]
                 taken = min(remaining, float(lot["remaining_quantity"]))
                 cost_basis += taken * float(lot["unit_cost"])
                 open_date = min(open_date, lot["open_date"])
                 currency = lot["currency"]
+                if lot.get("note"):
+                    open_notes.append(str(lot["note"]))
                 lot["remaining_quantity"] = float(lot["remaining_quantity"]) - taken
                 remaining -= taken
                 if lot["remaining_quantity"] <= EPS:
@@ -327,6 +616,9 @@ class PortfolioPerformanceService:
                     "pnl": round(pnl_cny, 6),
                     "return_pct": round(return_pct, 4) if return_pct is not None else None,
                     "fx_stale": bool(stale),
+                    "sell_trade_uid": str(trade.trade_uid or ""),
+                    "sell_note": str(trade.note or ""),
+                    "open_notes": open_notes,
                 }
             )
 

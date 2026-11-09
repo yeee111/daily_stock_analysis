@@ -306,6 +306,77 @@ export interface PortfolioPerformanceResponse {
   notes: string[];
 }
 
+export interface PortfolioSellReviewItem {
+  stockCode: string;
+  stockName?: string | null;
+  market: string;
+  openDate: string;
+  closeDate: string;
+  holdingDays: number;
+  quantity: number;
+  avgCost?: number | null;
+  avgPrice?: number | null;
+  pnl: number;
+  returnPct?: number | null;
+  exitReason: string;
+  exitReasonLabel: string;
+  entrySignalId?: number | null;
+  entryScore?: number | null;
+  entryReason?: string | null;
+  stopLoss?: number | null;
+  targetPrice?: number | null;
+  postSellSessions: number;
+  postSell5dPct?: number | null;
+  postSell10dPct?: number | null;
+  postSell20dPct?: number | null;
+  exitVerdict?: string | null;
+  exitVerdictLabel?: string | null;
+  verdictHorizon?: number | null;
+}
+
+export interface PortfolioSellReviewReasonBlock {
+  reason: string;
+  label: string;
+  count: number;
+  wins: number;
+  losses: number;
+  winRatePct?: number | null;
+  totalPnl: number;
+  avgReturnPct?: number | null;
+  avgHoldingDays?: number | null;
+}
+
+export interface PortfolioSellReviewSummary {
+  count: number;
+  wins: number;
+  losses: number;
+  winRatePct?: number | null;
+  realizedPnl: number;
+  avgReturnPct?: number | null;
+  avgHoldingDays?: number | null;
+}
+
+export interface PortfolioSellReviewExitQuality {
+  evaluated: number;
+  lockedGain?: number;
+  soldEarly?: number;
+  avoidedLoss?: number;
+  soldLow?: number;
+  breakeven?: number;
+}
+
+export interface PortfolioSellReviewResponse {
+  asOf: string;
+  accountId?: number | null;
+  summary: PortfolioSellReviewSummary;
+  byReason: PortfolioSellReviewReasonBlock[];
+  exitQuality: PortfolioSellReviewExitQuality;
+  topWinners: PortfolioSellReviewItem[];
+  topLosers: PortfolioSellReviewItem[];
+  items: PortfolioSellReviewItem[];
+  notes: string[];
+}
+
 export interface PortfolioMarketDataPositionSync {
   asOf: string;
   synced: string[];

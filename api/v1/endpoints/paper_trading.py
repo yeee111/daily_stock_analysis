@@ -52,6 +52,7 @@ AUTH_RESPONSE = {
         "持仓期间的分红/送转按 PAPER_TRADING_CORPORATE_ACTIONS 自动登记；"
         "新开仓只允许 PAPER_TRADING_ALLOWED_BOARDS 内的板块（默认 main,gem），卖出不受限。"
         "成交使用 trade_uid 幂等；同一成交日已有流水时需显式 force=true。"
+        "每次运行结果附带 position_health 持仓止损体检：无止损保护仓位清单与止损距离分布。"
     ),
     operation_id="runPaperTrading",
 )

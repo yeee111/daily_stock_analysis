@@ -519,6 +519,28 @@ class PaperTradingService:
         fill_date: Optional[date] = None
 
         def finish(payload: Dict[str, Any]) -> Dict[str, Any]:
+            # Catch-up sub-runs pin their own fill day; the health check belongs
+            # to the public run only and reflects the latest holdings.
+            if batch_fill_date is None:
+                try:
+                    health = self._position_stop_health(
+                        account_id=account_id,
+                        account_name=account_name,
+                        as_of=latest_data_date or date.today(),
+                        market=market,
+                        warnings=warnings,
+                    )
+                except Exception as exc:  # noqa: BLE001 - the check must never break the run
+                    logger.warning("Paper trading stop-health check failed: %s", exc)
+                    payload.setdefault("warnings", []).append(f"持仓止损体检失败：{exc}")
+                else:
+                    if health is not None:
+                        payload["position_health"] = health
+                        naked = [row["code"] for row in health["no_stop_positions"]]
+                        if naked:
+                            payload.setdefault("warnings", []).append(
+                                f"持仓体检：{'、'.join(naked)} 的建仓信号没有止损价，属于无止损保护仓位"
+                            )
             return self._merge_catchup(payload, catchup_payload)
 
         if not active:
@@ -1057,12 +1079,8 @@ class PaperTradingService:
             warnings.append(f"读取纸面成交流水失败，跳过止损/止盈与顺延检查：{exc}")
             return []
 
-    def _exit_levels(self, trades: Sequence[Any]) -> Dict[str, Dict[str, Any]]:
-        """Latest paper buy per symbol -> the stop/target of the signal behind it.
-
-        Re-reading the signal (instead of copying the levels into the trade)
-        keeps one source of truth and survives signal reassessment.
-        """
+    @staticmethod
+    def _latest_buy_by_code(trades: Sequence[Any]) -> Dict[str, Any]:
         latest_buy: Dict[str, Any] = {}
         for trade in trades:
             if str(getattr(trade, "side", "") or "").lower() != "buy":
@@ -1082,7 +1100,15 @@ class PaperTradingService:
             )
             if current_key is None or key > current_key:
                 latest_buy[code] = trade
+        return latest_buy
 
+    def _exit_levels(self, trades: Sequence[Any]) -> Dict[str, Dict[str, Any]]:
+        """Latest paper buy per symbol -> the stop/target of the signal behind it.
+
+        Re-reading the signal (instead of copying the levels into the trade)
+        keeps one source of truth and survives signal reassessment.
+        """
+        latest_buy = self._latest_buy_by_code(trades)
         levels: Dict[str, Dict[str, Any]] = {}
         getter = getattr(self.signals, "get_signal", None)
         if not callable(getter) or not latest_buy:
@@ -1099,6 +1125,101 @@ class PaperTradingService:
                 continue
             levels[code] = {"stop": stop, "target": target, "signal": signal}
         return levels
+
+    def _position_stop_health(
+        self,
+        *,
+        account_id: Optional[int],
+        account_name: str,
+        as_of: date,
+        market: str,
+        warnings: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Flag holdings without a stop_loss and bucket stop distances.
+
+        Read-only: resolves the account without creating it and never writes.
+        """
+        account, _ = self._resolve_account(
+            account_id=account_id,
+            account_name=account_name,
+            dry_run=True,
+        )
+        if account.get("id") is None:
+            return None
+        account_pk = int(account["id"])
+        _, positions, _ = self._load_state(
+            account=account,
+            reference_date=as_of,
+            market=market,
+            initial_cash=1.0,
+            warnings=warnings,
+        )
+        trades = self._paper_trades(account_pk, as_of=as_of, warnings=warnings)
+        latest_buy = self._latest_buy_by_code(trades)
+        getter = getattr(self.signals, "get_signal", None)
+
+        no_stop: List[Dict[str, Any]] = []
+        distances: List[Dict[str, Any]] = []
+        distribution = {
+            "within_3pct": 0,
+            "between_3_5pct": 0,
+            "between_5_8pct": 0,
+            "over_8pct": 0,
+            "unknown_price": 0,
+        }
+        for code, position in sorted(positions.items()):
+            if int(position["quantity"]) <= 0:
+                continue
+            last_price = float(position.get("last_price") or 0.0)
+            buy = latest_buy.get(code)
+            signal_id = _signal_id_from_note(getattr(buy, "note", None)) if buy is not None else None
+            signal: Dict[str, Any] = {}
+            if signal_id is not None and callable(getter):
+                try:
+                    signal = getter(int(signal_id)) or {}
+                except Exception:  # noqa: BLE001 - a deleted signal means no protection
+                    signal = {}
+            stop = _positive_float(signal.get("stop_loss"))
+            target = _positive_float(signal.get("target_price"))
+            if stop is None:
+                no_stop.append({
+                    "code": code,
+                    "quantity": int(position["quantity"]),
+                    "last_price": last_price or None,
+                    "signal_id": signal_id,
+                    "target_price": target,
+                })
+                continue
+            distance_pct: Optional[float] = None
+            if last_price > 0:
+                distance_pct = round((stop / last_price - 1.0) * 100.0, 2)
+                magnitude = abs(distance_pct)
+                if magnitude <= 3.0:
+                    distribution["within_3pct"] += 1
+                elif magnitude <= 5.0:
+                    distribution["between_3_5pct"] += 1
+                elif magnitude <= 8.0:
+                    distribution["between_5_8pct"] += 1
+                else:
+                    distribution["over_8pct"] += 1
+            else:
+                distribution["unknown_price"] += 1
+            distances.append({
+                "code": code,
+                "last_price": last_price or None,
+                "stop_loss": stop,
+                "distance_pct": distance_pct,
+            })
+
+        held_names = len(no_stop) + len(distances)
+        return {
+            "as_of": as_of.isoformat(),
+            "held_names": held_names,
+            "covered_names": len(distances),
+            "no_stop_positions": no_stop,
+            "stop_distances": distances,
+            "distance_distribution": distribution,
+        }
 
     @staticmethod
     def _sessions_between(market: str, start: date, end: date) -> List[date]:

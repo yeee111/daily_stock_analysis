@@ -591,6 +591,193 @@ class PortfolioPerformanceTestCase(unittest.TestCase):
         self.assertIsNone(rows[0]["pct_chg"])
         self.assertAlmostEqual(rows[1]["pct_chg"], 1.9900497512, places=6)
 
+    # ------------------------------------------------------------------
+    # Sell review (exit attribution)
+    # ------------------------------------------------------------------
+    def _paper_trade(
+        self,
+        account_id: int,
+        symbol: str,
+        on_date: date,
+        side: str,
+        quantity: float,
+        price: float,
+        *,
+        uid: str,
+        note: str = "",
+    ) -> None:
+        self.service.record_trade(
+            account_id=account_id,
+            symbol=symbol,
+            trade_date=on_date,
+            side=side,
+            quantity=quantity,
+            price=price,
+            market="cn",
+            currency="CNY",
+            trade_uid=uid,
+            note=note,
+        )
+
+    @staticmethod
+    def _signal_service(signals: dict) -> Any:
+        def get_signal(signal_id: int) -> dict:
+            if signal_id not in signals:
+                raise KeyError(signal_id)
+            return signals[signal_id]
+
+        return SimpleNamespace(get_signal=get_signal)
+
+    def _review_service(self, signals: dict) -> PortfolioPerformanceService:
+        return PortfolioPerformanceService(
+            portfolio_service=self.service,
+            signal_service=self._signal_service(signals),
+        )
+
+    def test_sell_review_classifies_exit_reasons_and_entry_thesis(self) -> None:
+        account_id = self._account()
+        signals = {
+            11: {"id": 11, "action": "buy", "stock_name": "贵州茅台", "stop_loss": 9.0,
+                 "target_price": 12.0, "score": 80, "reason": "thesis A"},
+            22: {"id": 22, "action": "buy", "stock_name": "浦发银行", "stop_loss": 8.0,
+                 "target_price": 11.0, "score": 70, "reason": "thesis B"},
+            33: {"id": 33, "action": "sell", "stock_name": "宝钢股份", "stop_loss": None,
+                 "target_price": None, "score": None, "reason": "exit thesis"},
+            44: {"id": 44, "action": "buy", "stock_name": "宝钢股份", "stop_loss": None,
+                 "target_price": None, "score": 60, "reason": "thesis C"},
+        }
+        self._paper_trade(account_id, "600519", date(2026, 1, 5), "buy", 1000, 10.0,
+                          uid="paper-2026-01-05-600519-buy", note="paper trading: signal #11")
+        self._paper_trade(account_id, "600519", date(2026, 1, 15), "sell", 1000, 12.0,
+                          uid="paper-2026-01-15-600519-sell-exit", note="paper trading: signal #11")
+        self._paper_trade(account_id, "600000", date(2026, 1, 5), "buy", 1000, 10.0,
+                          uid="paper-2026-01-05-600000-buy", note="paper trading: signal #22")
+        self._paper_trade(account_id, "600000", date(2026, 1, 16), "sell", 1000, 8.0,
+                          uid="paper-2026-01-16-600000-sell-exit", note="paper trading: signal #22")
+        self._paper_trade(account_id, "600002", date(2026, 1, 5), "buy", 1000, 10.0,
+                          uid="paper-2026-01-05-600002-buy", note="paper trading: signal #44")
+        self._paper_trade(account_id, "600002", date(2026, 1, 19), "sell", 1000, 10.5,
+                          uid="paper-2026-01-19-600002-sell", note="paper trading: signal #33")
+        self._paper_trade(account_id, "600004", date(2026, 1, 5), "buy", 1000, 10.0,
+                          uid="manual-2026-01-05-600004-buy")
+        self._paper_trade(account_id, "600004", date(2026, 1, 20), "sell", 1000, 11.0,
+                          uid="manual-2026-01-20-600004-sell")
+
+        review = self._review_service(signals).get_sell_review(
+            account_id=account_id, as_of=date(2026, 1, 20)
+        )
+
+        self.assertEqual(review["summary"]["count"], 4)
+        by_code = {row["stock_code"]: row for row in review["items"]}
+        self.assertEqual(by_code["600519"]["exit_reason"], "take_profit")
+        self.assertEqual(by_code["600519"]["exit_reason_label"], "止盈触发")
+        self.assertEqual(by_code["600519"]["entry_signal_id"], 11)
+        self.assertEqual(by_code["600519"]["entry_score"], 80)
+        self.assertEqual(by_code["600519"]["entry_reason"], "thesis A")
+        self.assertEqual(by_code["600519"]["stock_name"], "贵州茅台")
+        self.assertEqual(by_code["600000"]["exit_reason"], "stop_loss")
+        self.assertEqual(by_code["600002"]["exit_reason"], "signal_sell")
+        self.assertEqual(by_code["600004"]["exit_reason"], "manual")
+        reasons = {block["reason"]: block for block in review["by_reason"]}
+        self.assertEqual(reasons["take_profit"]["count"], 1)
+        self.assertEqual(reasons["take_profit"]["wins"], 1)
+        self.assertAlmostEqual(reasons["take_profit"]["total_pnl"], 2000.0, places=1)
+        self.assertEqual(reasons["stop_loss"]["losses"], 1)
+        self.assertEqual([row["stock_code"] for row in review["top_winners"]][0], "600519")
+        self.assertEqual([row["stock_code"] for row in review["top_losers"]], ["600000"])
+
+    def test_sell_review_post_sell_drift_and_verdict(self) -> None:
+        account_id = self._account()
+        signals = {
+            11: {"id": 11, "action": "buy", "stock_name": "贵州茅台", "stop_loss": 9.0,
+                 "target_price": 12.0, "score": 80, "reason": "thesis A"},
+        }
+        self._paper_trade(account_id, "600519", date(2026, 1, 5), "buy", 1000, 10.0,
+                          uid="paper-2026-01-05-600519-buy", note="paper trading: signal #11")
+        self._paper_trade(account_id, "600519", date(2026, 1, 15), "sell", 1000, 12.0,
+                          uid="paper-2026-01-15-600519-sell-exit", note="paper trading: signal #11")
+        for offset, close in enumerate([11.5, 11.0, 10.5, 10.0, 9.5, 9.0], start=1):
+            self._save_close(
+                "600519", date(2026, 1, 15) + pd.Timedelta(days=offset).to_pytimedelta(), close
+            )
+
+        review = self._review_service(signals).get_sell_review(
+            account_id=account_id, as_of=date(2026, 1, 25)
+        )
+
+        row = review["items"][0]
+        self.assertEqual(row["post_sell_sessions"], 6)
+        self.assertAlmostEqual(row["post_sell_5d_pct"], -20.83, places=2)
+        self.assertIsNone(row["post_sell_10d_pct"])
+        self.assertIsNone(row["post_sell_20d_pct"])
+        self.assertEqual(row["exit_verdict"], "locked_gain")
+        self.assertEqual(row["verdict_horizon"], 5)
+        self.assertEqual(review["exit_quality"]["evaluated"], 1)
+        self.assertEqual(review["exit_quality"]["locked_gain"], 1)
+
+    def test_sell_review_empty_account(self) -> None:
+        account_id = self._account()
+        review = self._review_service({}).get_sell_review(
+            account_id=account_id, as_of=date(2026, 1, 20)
+        )
+        self.assertEqual(review["summary"]["count"], 0)
+        self.assertEqual(review["items"], [])
+        self.assertEqual(review["by_reason"], [])
+        self.assertTrue(any("尚无已平仓交易" in note for note in review["notes"]))
+
+    def test_classify_exit_edge_cases(self) -> None:
+        classify = PortfolioPerformanceService._classify_exit
+        level_signal = {"action": "buy", "stop_loss": 9.0, "target_price": 12.0}
+        self.assertEqual(
+            classify(uid="paper-x-sell-exit", signal=level_signal, price=8.5, has_signal_ref=True),
+            "stop_loss",
+        )
+        self.assertEqual(
+            classify(uid="paper-x-sell-exit", signal=level_signal, price=11.9, has_signal_ref=True),
+            "take_profit",
+        )
+        self.assertEqual(
+            classify(uid="paper-x-sell-exit", signal=None, price=10.0, has_signal_ref=True),
+            "level_exit",
+        )
+        self.assertEqual(
+            classify(uid="paper-x-sell", signal={"action": "reduce"}, price=10.0, has_signal_ref=True),
+            "signal_reduce",
+        )
+        self.assertEqual(
+            classify(uid="paper-x-sell", signal=None, price=10.0, has_signal_ref=True),
+            "unknown",
+        )
+        self.assertEqual(
+            classify(uid="manual-x-sell", signal=None, price=10.0, has_signal_ref=False),
+            "manual",
+        )
+
+    def test_sell_review_endpoint_returns_attribution(self) -> None:
+        account_id = self._account()
+        signals = {
+            11: {"id": 11, "action": "buy", "stock_name": "贵州茅台", "stop_loss": 9.0,
+                 "target_price": 12.0, "score": 80, "reason": "thesis A"},
+        }
+        self._paper_trade(account_id, "600519", date(2026, 1, 5), "buy", 1000, 10.0,
+                          uid="paper-2026-01-05-600519-buy", note="paper trading: signal #11")
+        self._paper_trade(account_id, "600519", date(2026, 1, 15), "sell", 1000, 12.0,
+                          uid="paper-2026-01-15-600519-sell-exit", note="paper trading: signal #11")
+        with patch(
+            "api.v1.endpoints.portfolio.PortfolioPerformanceService",
+            return_value=self._review_service(signals),
+        ):
+            response = self.client.get(
+                "/api/v1/portfolio/sell-review",
+                params={"account_id": account_id, "as_of": "2026-01-20"},
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["summary"]["count"], 1)
+        self.assertEqual(body["items"][0]["exit_reason"], "take_profit")
+        self.assertEqual(body["items"][0]["entry_reason"], "thesis A")
+        self.assertEqual(body["by_reason"][0]["reason"], "take_profit")
+
 
 if __name__ == "__main__":
     unittest.main()

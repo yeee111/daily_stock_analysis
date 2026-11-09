@@ -409,6 +409,58 @@ class PortfolioPerformanceResponse(BaseModel):
     notes: List[str] = Field(default_factory=list)
 
 
+class PortfolioSellReviewItem(BaseModel):
+    stock_code: str
+    stock_name: Optional[str] = None
+    market: str
+    open_date: str
+    close_date: str
+    holding_days: int
+    quantity: float
+    avg_cost: Optional[float] = None
+    avg_price: Optional[float] = None
+    pnl: float
+    return_pct: Optional[float] = None
+    exit_reason: str = Field(description="take_profit/stop_loss/signal_sell/signal_reduce/level_exit/manual/unknown")
+    exit_reason_label: str
+    entry_signal_id: Optional[int] = None
+    entry_score: Optional[float] = None
+    entry_reason: Optional[str] = Field(None, description="建仓信号理由（截断至 160 字）")
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+    post_sell_sessions: int = 0
+    post_sell_5d_pct: Optional[float] = Field(None, description="卖出后第 5 个交易日收盘相对卖价涨跌幅 %")
+    post_sell_10d_pct: Optional[float] = None
+    post_sell_20d_pct: Optional[float] = None
+    exit_verdict: Optional[str] = Field(None, description="locked_gain/sold_early/avoided_loss/sold_low/breakeven")
+    exit_verdict_label: Optional[str] = None
+    verdict_horizon: Optional[int] = Field(None, description="结论所用的卖后交易日数（20/10/5）")
+
+
+class PortfolioSellReviewReasonBlock(BaseModel):
+    reason: str
+    label: str
+    count: int = 0
+    wins: int = 0
+    losses: int = 0
+    win_rate_pct: Optional[float] = None
+    total_pnl: float = 0.0
+    avg_return_pct: Optional[float] = None
+    avg_holding_days: Optional[float] = None
+
+
+class PortfolioSellReviewResponse(BaseModel):
+    as_of: str
+    account_id: Optional[int] = None
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    by_reason: List[PortfolioSellReviewReasonBlock] = Field(default_factory=list)
+    exit_quality: Dict[str, Any] = Field(default_factory=dict)
+    top_winners: List[PortfolioSellReviewItem] = Field(default_factory=list)
+    top_losers: List[PortfolioSellReviewItem] = Field(default_factory=list)
+    items: List[PortfolioSellReviewItem] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+
+
 class PortfolioMarketDataPositionSync(BaseModel):
     as_of: str
     synced: List[str] = Field(default_factory=list)

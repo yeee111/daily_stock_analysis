@@ -66,6 +66,38 @@ export interface PaperTradingPortfolioSummary {
   cashAfterPlan: number;
 }
 
+export interface PaperTradingNoStopPosition {
+  code: string;
+  quantity: number;
+  lastPrice?: number | null;
+  signalId?: number | null;
+  targetPrice?: number | null;
+}
+
+export interface PaperTradingStopDistance {
+  code: string;
+  lastPrice?: number | null;
+  stopLoss: number;
+  distancePct?: number | null;
+}
+
+export interface PaperTradingStopDistribution {
+  within3Pct?: number;
+  between35Pct?: number;
+  between58Pct?: number;
+  over8Pct?: number;
+  unknownPrice?: number;
+}
+
+export interface PaperTradingPositionHealth {
+  asOf: string;
+  heldNames: number;
+  coveredNames: number;
+  noStopPositions: PaperTradingNoStopPosition[];
+  stopDistances: PaperTradingStopDistance[];
+  distanceDistribution: PaperTradingStopDistribution;
+}
+
 export interface PaperTradingRunResponse {
   status: string;
   dryRun: boolean;
@@ -80,4 +112,5 @@ export interface PaperTradingRunResponse {
   orders: PaperTradingOrder[];
   warnings: string[];
   corporateActions: string[];
+  positionHealth?: PaperTradingPositionHealth | null;
 }

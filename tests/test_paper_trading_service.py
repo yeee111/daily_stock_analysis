@@ -1148,3 +1148,124 @@ def test_exit_uses_slippage_and_sells_partial_when_adv_is_capped(monkeypatch):
     assert (order["side"], order["quantity"], order["price"]) == ("sell", 400, 11.94)
     item = next(row for row in result["items"] if row["action"] == "take_profit")
     assert "部分成交" in item["reason"]
+
+
+# ----------------------------------------------------------------------
+# Position stop-health check (no-stop holdings + stop distance distribution)
+# ----------------------------------------------------------------------
+def _health_service(positions, trades, signals):
+    portfolio = _FakePortfolio(accounts=[_account()], positions=positions)
+    portfolio.repo.trades.extend(trades)
+    return _Service(
+        latest=date(2026, 10, 30),
+        bars={},
+        portfolio=portfolio,
+        signals=_FakeSignals(signals),
+    )
+
+
+def test_position_stop_health_flags_naked_positions_and_buckets_distances():
+    service = _health_service(
+        positions=[
+            _position("600519", 1000, price=10.0),
+            _position("600760", 200, price=50.0),
+            _position("600000", 300, price=8.0),
+        ],
+        trades=[_trade(1, "600519", signal_id=7), _trade(2, "600760", signal_id=8)],
+        signals=[
+            _signal(7, "600519", "buy", stop=9.5),
+            _signal(8, "600760", "buy", target=53.0),
+        ],
+    )
+
+    warnings = []
+    health = service._position_stop_health(
+        account_id=1,
+        account_name="纸面交易",
+        as_of=date(2026, 10, 30),
+        market="cn",
+        warnings=warnings,
+    )
+
+    assert health["as_of"] == "2026-10-30"
+    assert health["held_names"] == 3
+    assert health["covered_names"] == 1
+    naked = {row["code"]: row for row in health["no_stop_positions"]}
+    assert sorted(naked) == ["600000", "600760"]
+    assert naked["600760"]["signal_id"] == 8
+    assert naked["600760"]["target_price"] == 53.0
+    assert naked["600000"]["signal_id"] is None
+    distance = health["stop_distances"][0]
+    assert (distance["code"], distance["stop_loss"], distance["distance_pct"]) == ("600519", 9.5, -5.0)
+    assert health["distance_distribution"]["between_3_5pct"] == 1
+    assert service.portfolio.written == []
+    assert service.portfolio.created == []
+
+
+def test_stop_distance_distribution_boundaries():
+    codes = ["600001", "600002", "600003", "600004"]
+    stops = [9.7, 9.5, 9.2, 9.0]
+    service = _health_service(
+        positions=[_position(code, 100, price=10.0) for code in codes],
+        trades=[_trade(i + 1, code, signal_id=i + 1) for i, code in enumerate(codes)],
+        signals=[_signal(i + 1, code, "buy", stop=stop) for i, (code, stop) in enumerate(zip(codes, stops))],
+    )
+
+    health = service._position_stop_health(
+        account_id=1,
+        account_name="纸面交易",
+        as_of=date(2026, 10, 30),
+        market="cn",
+        warnings=[],
+    )
+
+    assert health["no_stop_positions"] == []
+    assert health["distance_distribution"] == {
+        "within_3pct": 1,
+        "between_3_5pct": 1,
+        "between_5_8pct": 1,
+        "over_8pct": 1,
+        "unknown_price": 0,
+    }
+
+
+def test_stop_distance_unknown_when_price_missing():
+    service = _health_service(
+        positions=[_position("600519", 100, price=0.0)],
+        trades=[_trade(1, "600519", signal_id=7)],
+        signals=[_signal(7, "600519", "buy", stop=9.0)],
+    )
+
+    health = service._position_stop_health(
+        account_id=1,
+        account_name="纸面交易",
+        as_of=date(2026, 10, 30),
+        market="cn",
+        warnings=[],
+    )
+
+    assert health["covered_names"] == 1
+    assert health["stop_distances"][0]["distance_pct"] is None
+    assert health["distance_distribution"]["unknown_price"] == 1
+
+
+def test_run_result_flags_position_without_stop():
+    service = _exit_service(stop=None, target=12.0, fill_bar=_bar(10.0, 10.4, high=10.5, low=9.5))
+
+    result = service.run(dry_run=True)
+
+    health = result["position_health"]
+    assert health["covered_names"] == 0
+    assert health["no_stop_positions"][0]["code"] == "600519"
+    assert any("无止损" in warning for warning in result["warnings"])
+    assert service.portfolio.written == []
+
+
+def test_run_result_health_absent_when_account_does_not_exist():
+    service = _Service(latest=date(2026, 10, 30), bars={}, portfolio=_FakePortfolio(), signals=_FakeSignals([]))
+
+    result = service.run(dry_run=True)
+
+    assert result["status"] == pt.STATUS_NO_ACTIVE_SIGNALS
+    assert "position_health" not in result
+    assert service.portfolio.created == []

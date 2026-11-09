@@ -13,6 +13,7 @@ const {
   getSnapshot,
   getRisk,
   getPerformance,
+  getSellReview,
   refreshMarketData,
   refreshFx,
   listImportBrokers,
@@ -37,6 +38,7 @@ const {
   getSnapshot: vi.fn(),
   getRisk: vi.fn(),
   getPerformance: vi.fn(),
+  getSellReview: vi.fn(),
   refreshMarketData: vi.fn(),
   refreshFx: vi.fn(),
   listImportBrokers: vi.fn(),
@@ -71,6 +73,7 @@ vi.mock('../../api/portfolio', () => ({
     getSnapshot,
     getRisk,
     getPerformance,
+    getSellReview,
     refreshMarketData,
     refreshFx,
     listImportBrokers,
@@ -103,6 +106,12 @@ vi.mock('recharts', () => ({
   Tooltip: () => null,
   Legend: () => null,
   Cell: () => null,
+}));
+
+const { runPaperTrading } = vi.hoisted(() => ({ runPaperTrading: vi.fn() }));
+
+vi.mock('../../api/paperTrading', () => ({
+  paperTradingApi: { run: runPaperTrading },
 }));
 
 type AccountItem = {
@@ -375,6 +384,17 @@ describe('PortfolioPage FX refresh', () => {
     getSnapshot.mockImplementation(async ({ accountId }: { accountId?: number } = {}) => makeSnapshot({ accountId, fxStale: true }));
     getRisk.mockResolvedValue(makeRisk());
     getPerformance.mockResolvedValue(makePerformance());
+    getSellReview.mockResolvedValue({
+      asOf: '2026-11-09',
+      accountId: null,
+      summary: { count: 0, wins: 0, losses: 0, winRatePct: null, realizedPnl: 0, avgReturnPct: null, avgHoldingDays: null },
+      byReason: [],
+      exitQuality: { evaluated: 0 },
+      topWinners: [],
+      topLosers: [],
+      items: [],
+      notes: [],
+    });
     refreshMarketData.mockResolvedValue({
       asOf: '2026-11-04',
       positions: { asOf: '2026-11-04', synced: [], failed: [] },
@@ -2517,5 +2537,45 @@ describe('PortfolioPage FX refresh', () => {
     await waitFor(() => expect(getAccounts).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByText('Main (#1)')).not.toBeInTheDocument());
     expect(screen.getByRole('option', { name: 'Alt (#2)' })).toBeInTheDocument();
+  });
+
+  it('renders the paper stop-health block after a dry run', async () => {
+    runPaperTrading.mockResolvedValue({
+      status: 'nothing_to_do',
+      dryRun: true,
+      message: '最新数据日没有到期的信号批次。',
+      market: 'cn',
+      latestDataDate: '2026-11-06',
+      signalCounts: {},
+      account: null,
+      batch: null,
+      portfolio: null,
+      items: [],
+      orders: [],
+      warnings: ['持仓体检：600760 的建仓信号没有止损价，属于无止损保护仓位'],
+      corporateActions: [],
+      positionHealth: {
+        asOf: '2026-11-06',
+        heldNames: 2,
+        coveredNames: 1,
+        noStopPositions: [
+          { code: '600760', quantity: 200, lastPrice: 48.93, signalId: 165, targetPrice: 53 },
+        ],
+        stopDistances: [{ code: '600519', lastPrice: 10, stopLoss: 9.5, distancePct: -5 }],
+        distanceDistribution: { between35Pct: 1 },
+      },
+    });
+
+    render(<PortfolioPage />);
+    await waitForInitialLoad();
+
+    fireEvent.click(screen.getByRole('button', { name: '试跑（不下单）' }));
+
+    expect(await screen.findByText('持仓止损体检')).toBeInTheDocument();
+    expect(screen.getByText('无止损保护持仓')).toBeInTheDocument();
+    expect(screen.getByText(/600760 · 数量 200 · 现价 48\.93 · #165 仅有目标价 53\.00/)).toBeInTheDocument();
+    expect(screen.getByText('3–5%: 1')).toBeInTheDocument();
+    expect(screen.getByText(/600519 距止损 -5\.00% \(止损价 9\.50\)/)).toBeInTheDocument();
+    expect(runPaperTrading).toHaveBeenCalledWith(expect.objectContaining({ dryRun: true }));
   });
 });

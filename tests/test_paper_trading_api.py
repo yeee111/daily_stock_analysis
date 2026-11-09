@@ -139,3 +139,28 @@ def test_validation_error_maps_to_400(client: TestClient) -> None:
 def test_invalid_weight_is_rejected(client: TestClient) -> None:
     response = client.post("/paper-trading/run", json={"max_weight": 1.5})
     assert response.status_code == 422
+
+
+def test_run_response_carries_position_health(client: TestClient) -> None:
+    payload = _payload()
+    payload["position_health"] = {
+        "as_of": "2026-10-30",
+        "held_names": 2,
+        "covered_names": 1,
+        "no_stop_positions": [
+            {"code": "600760", "quantity": 200, "last_price": 50.0, "signal_id": 8, "target_price": 53.0}
+        ],
+        "stop_distances": [
+            {"code": "600519", "last_price": 10.0, "stop_loss": 9.5, "distance_pct": -5.0}
+        ],
+        "distance_distribution": {"between_3_5pct": 1},
+    }
+    with patch.object(module, "PaperTradingService") as service_cls:
+        service_cls.return_value.run.return_value = payload
+        response = client.post("/paper-trading/run", json={})
+
+    assert response.status_code == 200
+    health = response.json()["position_health"]
+    assert health["held_names"] == 2
+    assert health["no_stop_positions"][0]["code"] == "600760"
+    assert health["stop_distances"][0]["distance_pct"] == -5.0

@@ -33,6 +33,7 @@ from api.v1.schemas.portfolio import (
     PortfolioPositionAnalysisRequest,
     PortfolioPerformanceResponse,
     PortfolioRiskResponse,
+    PortfolioSellReviewResponse,
     PortfolioSnapshotResponse,
     PortfolioTradeListResponse,
     PortfolioTradeCreateRequest,
@@ -707,6 +708,32 @@ def get_performance_report(
         raise _bad_request(exc)
     except Exception as exc:
         raise _internal_error("Get performance report failed", exc)
+
+
+@router.get(
+    "/sell-review",
+    response_model=PortfolioSellReviewResponse,
+    responses={400: {"model": ErrorResponse}, 500: {"model": ErrorResponse}},
+    summary="Get closed-trade sell review (exit attribution and post-sell drift)",
+    description=(
+        "Historical sell analysis: per closed trade the exit mechanism "
+        "(stop-loss / take-profit / signal sell), entry thesis, P&L, and "
+        "post-sell 5/10/20-session price drift, aggregated by exit reason. "
+        "Read-only; post-sell drift uses local daily bars."
+    ),
+)
+def get_sell_review(
+    account_id: Optional[int] = Query(None, description="Optional account id"),
+    as_of: Optional[date] = Query(None, description="Review date, default today"),
+) -> PortfolioSellReviewResponse:
+    service = PortfolioPerformanceService()
+    try:
+        data = service.get_sell_review(account_id=account_id, as_of=as_of)
+        return PortfolioSellReviewResponse(**data)
+    except ValueError as exc:
+        raise _bad_request(exc)
+    except Exception as exc:
+        raise _internal_error("Get sell review failed", exc)
 
 
 @router.post(

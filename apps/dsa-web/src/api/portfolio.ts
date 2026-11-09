@@ -20,6 +20,7 @@ import type {
   PortfolioPositionAnalysisRequest,
   PortfolioPerformanceResponse,
   PortfolioRiskResponse,
+  PortfolioSellReviewResponse,
   PortfolioSnapshotResponse,
   PortfolioTradeCreateRequest,
   PortfolioTradeListResponse,
@@ -162,6 +163,13 @@ export const portfolioApi = {
       params: buildSnapshotParams(query),
     });
     return toCamelCase<PortfolioPerformanceResponse>(response.data);
+  },
+
+  async getSellReview(query: FxRefreshQuery = {}): Promise<PortfolioSellReviewResponse> {
+    const response = await apiClient.get<Record<string, unknown>>('/api/v1/portfolio/sell-review', {
+      params: buildFxRefreshParams(query),
+    });
+    return toCamelCase<PortfolioSellReviewResponse>(response.data);
   },
 
   async refreshMarketData(query: SnapshotQuery = {}): Promise<PortfolioMarketDataRefreshResponse> {

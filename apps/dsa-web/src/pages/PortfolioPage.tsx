@@ -10,6 +10,7 @@ import { getParsedApiError } from '../api/error';
 import { ApiErrorAlert, Card, Badge, ConfirmDialog, EmptyState, InlineAlert, StatusDot } from '../components/common';
 import { PortfolioSignalSummary } from '../components/decision-signals/DecisionSignalDisplay';
 import { PortfolioPerformancePanel } from '../components/portfolio/PortfolioPerformancePanel';
+import { PortfolioSellReviewPanel } from '../components/portfolio/PortfolioSellReviewPanel';
 import { useUiLanguage } from '../contexts/UiLanguageContext';
 import { formatUiText } from '../i18n/uiText';
 import { PAPER_TRADING_TEXT, PORTFOLIO_TEXT } from '../locales/featureText';
@@ -1650,6 +1651,67 @@ const PortfolioPage: React.FC = () => {
                 </ul>
               </div>
             ) : null}
+            {paperTradingResult.positionHealth ? (
+              <div className="space-y-2 rounded-xl border border-white/10 px-3 py-2">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                  <span className="font-semibold text-foreground">{paperText.healthTitle}</span>
+                  <span className="text-secondary">{paperText.healthAsOf}: {paperTradingResult.positionHealth.asOf}</span>
+                  <span className="text-secondary">{paperText.healthHeld}: {paperTradingResult.positionHealth.heldNames}</span>
+                  <span className="text-secondary">
+                    {paperText.healthCovered}: {paperTradingResult.positionHealth.coveredNames}/{paperTradingResult.positionHealth.heldNames}
+                  </span>
+                </div>
+                {paperTradingResult.positionHealth.noStopPositions.length > 0 ? (
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-danger">{paperText.healthNoStopTitle}</div>
+                    <ul className="list-disc space-y-1 pl-5 text-xs text-danger">
+                      {paperTradingResult.positionHealth.noStopPositions.map((row) => (
+                        <li key={row.code}>
+                          {row.code} · {paperText.quantity} {row.quantity}
+                          {row.lastPrice != null ? ` · ${paperText.healthLastPrice} ${row.lastPrice.toFixed(2)}` : ''}
+                          {row.signalId == null
+                            ? ` · ${paperText.healthNoSignal}`
+                            : row.targetPrice != null
+                              ? ` · #${row.signalId} ${paperText.healthTargetOnly} ${row.targetPrice.toFixed(2)}`
+                              : ` · #${row.signalId}`}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : (
+                  <p className="text-xs text-secondary">{paperText.healthNoStopNone}</p>
+                )}
+                {paperTradingResult.positionHealth.heldNames > 0 ? (
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-foreground">{paperText.healthDistanceTitle}</div>
+                    <div className="flex flex-wrap gap-1 text-xs text-secondary">
+                      {[
+                        [paperText.healthBucketWithin3, paperTradingResult.positionHealth.distanceDistribution.within3Pct],
+                        [paperText.healthBucket3To5, paperTradingResult.positionHealth.distanceDistribution.between35Pct],
+                        [paperText.healthBucket5To8, paperTradingResult.positionHealth.distanceDistribution.between58Pct],
+                        [paperText.healthBucketOver8, paperTradingResult.positionHealth.distanceDistribution.over8Pct],
+                        [paperText.healthBucketUnknown, paperTradingResult.positionHealth.distanceDistribution.unknownPrice],
+                      ].map(([label, count]) => (
+                        <span key={String(label)} className="rounded bg-white/5 px-2 py-0.5">
+                          {label}: {count ?? 0}
+                        </span>
+                      ))}
+                    </div>
+                    {paperTradingResult.positionHealth.stopDistances.length > 0 ? (
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-secondary">
+                        {paperTradingResult.positionHealth.stopDistances.map((row) => (
+                          <span key={row.code}>
+                            {row.code} {paperText.healthDistance}{' '}
+                            {row.distancePct != null ? `${row.distancePct.toFixed(2)}%` : paperText.none}
+                            {' '}({paperText.healthStopPrice} {row.stopLoss.toFixed(2)})
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {paperTradingResult.items.length === 0 ? (
               <p className="text-xs text-secondary">{paperText.noOrders}</p>
             ) : (
@@ -1707,6 +1769,8 @@ const PortfolioPage: React.FC = () => {
         costMethod={costMethod}
         includeRealtime={false}
       />
+
+      <PortfolioSellReviewPanel accountId={queryAccountId ?? null} />
 
       {(showCreateAccount || !hasAccounts) ? (
         <Card padding="md">
