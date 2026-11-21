@@ -57,9 +57,9 @@ export const PortfolioSellReviewPanel: React.FC<SellReviewPanelProps> = ({
       <div>
         <h3 className="mb-2 text-xs font-semibold text-foreground">{heading}</h3>
         <div className="space-y-2">
-          {rows.map((row) => (
+          {rows.map((row, idx) => (
             <div
-              key={`${row.stockCode}-${row.closeDate}`}
+              key={`${row.stockCode}-${row.closeDate}-${idx}`}
               className="rounded-xl border border-border/60 px-3 py-2 text-xs"
             >
               <div className="flex flex-wrap items-center gap-2">
@@ -249,8 +249,8 @@ export const PortfolioSellReviewPanel: React.FC<SellReviewPanelProps> = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((row) => (
-                    <tr key={`${row.stockCode}-${row.closeDate}`} className="border-b border-border/40">
+                  {items.map((row, idx) => (
+                    <tr key={`${row.stockCode}-${row.closeDate}-${idx}`} className="border-b border-border/40">
                       <td className="py-2 pr-2 text-foreground">
                         {row.stockCode}
                         {row.stockName ? <span className="ml-1 text-secondary">{row.stockName}</span> : null}

@@ -1,0 +1,30 @@
+test_RR恰等于1_0放行 (__main__.A_RR阈值边界.test_RR恰等于1_0放行) ... ok
+test_RR恰等于1_5放行 (__main__.A_RR阈值边界.test_RR恰等于1_5放行) ... ok
+test_RR略低于1_0拦截 (__main__.A_RR阈值边界.test_RR略低于1_0拦截) ... ok
+test_RR略低于1_5拦截 (__main__.A_RR阈值边界.test_RR略低于1_5拦截) ... ok
+test_all拦未知出场类型 (__main__.B_冷却边界.test_all拦未知出场类型) ... ok
+test_all拦止盈回补 (__main__.B_冷却边界.test_all拦止盈回补) ... ok
+test_off不拦 (__main__.B_冷却边界.test_off不拦) ... ok
+test_stop_only不拦止盈回补 (__main__.B_冷却边界.test_stop_only不拦止盈回补) ... ok
+test_出场当日回补拦截 (__main__.B_冷却边界.test_出场当日回补拦截) ... ok
+test_第5交易日仍拦截 (__main__.B_冷却边界.test_第5交易日仍拦截) ... ok
+test_第6交易日放行 (__main__.B_冷却边界.test_第6交易日放行) ... ok
+test_跨周末按交易日计数 (__main__.B_冷却边界.test_跨周末按交易日计数) ... ok
+test_非法scope回退off (__main__.B_冷却边界.test_非法scope回退off) ... ok
+test_默认配置冷却关闭 (__main__.B_冷却边界.test_默认配置冷却关闭) ... ok
+test_价格倒挂剔除不拦截 (__main__.C_坏价与宽度边界.test_价格倒挂剔除不拦截) ... ok
+test_坏止损宽度剔除不拦截 (__main__.C_坏价与宽度边界.test_坏止损宽度剔除不拦截) ... ok
+test_止损宽度恰20百分比进入RR (__main__.C_坏价与宽度边界.test_止损宽度恰20百分比进入RR) ... ok
+test_正常单不误拦 (__main__.C_坏价与宽度边界.test_正常单不误拦) ... ok
+test_缺入场区间剔除 (__main__.C_坏价与宽度边界.test_缺入场区间剔除) ... ok
+test_缺止损剔除 (__main__.C_坏价与宽度边界.test_缺止损剔除) ... ok
+test_缺止盈剔除 (__main__.C_坏价与宽度边界.test_缺止盈剔除) ... ok
+test_兜底仅补缺 (__main__.D_P0与配置解析.test_兜底仅补缺) ... ok
+test_组合配置解析 (__main__.D_P0与配置解析.test_组合配置解析) ... ok
+test_600519坏止损信号剔除且放行 (__main__.E_生产库真实坏价信号.test_600519坏止损信号剔除且放行) ... ok
+test_600760信号165剔除且放行 (__main__.E_生产库真实坏价信号.test_600760信号165剔除且放行) ... ok
+
+----------------------------------------------------------------------
+Ran 25 tests in 0.010s
+
+OK

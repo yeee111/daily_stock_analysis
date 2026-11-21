@@ -21,6 +21,9 @@
     "directories": {
       "output": "dist"
     },
+    "extraMetadata": {
+      "dsaUpdateCheck": "off"
+    },
     "afterPack": "scripts/afterPackMacos.js",
     "files": [
       "main.js",

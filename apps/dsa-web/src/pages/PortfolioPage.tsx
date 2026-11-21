@@ -657,6 +657,10 @@ const PortfolioPage: React.FC = () => {
   const [fxRefreshFeedback, setFxRefreshFeedback] = useState<FxRefreshFeedback | null>(null);
   const [error, setError] = useState<ParsedApiError | null>(null);
   const [riskWarning, setRiskWarning] = useState<string | null>(null);
+  const [quotesRefreshing, setQuotesRefreshing] = useState(false);
+  const [quotesRefreshedAt, setQuotesRefreshedAt] = useState<string | null>(null);
+  const [quotesRefreshError, setQuotesRefreshError] = useState<string | null>(null);
+  const [performanceRefreshToken, setPerformanceRefreshToken] = useState(0);
   const [writeWarning, setWriteWarning] = useState<string | null>(null);
   const [portfolioSignals, setPortfolioSignals] = useState<DecisionSignalItem[]>([]);
   const [portfolioSignalsLoading, setPortfolioSignalsLoading] = useState(false);
@@ -1320,6 +1324,36 @@ const PortfolioPage: React.FC = () => {
     setPortfolioSignalsRefreshKey((current) => current + 1);
   };
 
+  const handleRefreshQuotes = async () => {
+    if (quotesRefreshing) {
+      return;
+    }
+    setQuotesRefreshing(true);
+    setQuotesRefreshError(null);
+    try {
+      // 实时行情要逐只拉取，耗时明显高于收盘快照，单独放宽超时避免误报超时。
+      const data = await portfolioApi.getSnapshot(
+        {
+          accountId: queryAccountId,
+          costMethod,
+          includeRealtime: true,
+        },
+        { timeout: 60000 },
+      );
+      setSnapshot(data);
+      setError(null);
+      setQuotesRefreshedAt(
+        new Date().toLocaleTimeString(language === 'zh' ? 'zh-CN' : 'en-US', { hour12: false }),
+      );
+      // 业绩看板内的“当前持仓”卡片由 performance 接口单独计算，需同步切到实时价口径。
+      setPerformanceRefreshToken((token) => token + 1);
+    } catch (err) {
+      setQuotesRefreshError(getParsedApiError(err).message);
+    } finally {
+      setQuotesRefreshing(false);
+    }
+  };
+
   const runPaperTrading = async (dryRun: boolean) => {
     if (paperTradingRunning) {
       return;
@@ -1768,6 +1802,7 @@ const PortfolioPage: React.FC = () => {
         accountId={queryAccountId ?? null}
         costMethod={costMethod}
         includeRealtime={false}
+        refreshToken={performanceRefreshToken}
       />
 
       <PortfolioSellReviewPanel accountId={queryAccountId ?? null} />
@@ -1946,10 +1981,33 @@ const PortfolioPage: React.FC = () => {
 
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-3">
         <Card className="xl:col-span-2" padding="md">
-          <div className="flex items-center justify-between mb-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-foreground">{text.positionsTitle}</h2>
-            <span className="text-xs text-secondary">{formatUiText(text.countItems, { count: positionCount })}</span>
+            <div className="flex items-center gap-3">
+              {quotesRefreshedAt ? (
+                <span className="text-[11px] text-secondary">
+                  {formatUiText(text.priceRefreshedAt, { time: quotesRefreshedAt })}
+                </span>
+              ) : null}
+              <span className="text-xs text-secondary">{formatUiText(text.countItems, { count: positionCount })}</span>
+              <button
+                type="button"
+                className="btn-secondary !px-3 !py-1 !text-xs"
+                onClick={() => void handleRefreshQuotes()}
+                disabled={quotesRefreshing || isLoading || !hasAccounts}
+              >
+                {quotesRefreshing ? text.refreshingPrices : text.refreshPrices}
+              </button>
+            </div>
           </div>
+          {quotesRefreshError ? (
+            <InlineAlert
+              variant="warning"
+              title={text.priceRefreshErrorTitle}
+              message={quotesRefreshError}
+              className="mb-3 rounded-xl px-3 py-2 text-xs shadow-none"
+            />
+          ) : null}
           {portfolioSignalsWarning ? (
             <InlineAlert
               variant="warning"

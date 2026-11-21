@@ -115,6 +115,44 @@ class PortfolioPerformanceTestCase(unittest.TestCase):
         )
         self._save_close(symbol, on_date, price)
 
+    def test_single_account_view_excludes_other_accounts_clone_history(self) -> None:
+        """单账户视图的平仓明细只含该账户；全部账户视图仍含全部（克隆历史跨账户重复场景）。"""
+        account_a = self._account()
+        account_b = self._account()
+        self.service.record_cash_ledger(
+            account_id=account_a, event_date=date(2026, 1, 1), direction="in", amount=100_000.0
+        )
+        self.service.record_cash_ledger(
+            account_id=account_b, event_date=date(2026, 1, 1), direction="in", amount=100_000.0
+        )
+        # 两个账户同标的、不同日期的克隆式历史
+        self._trade(account_a, "600519", date(2026, 1, 5), "buy", 1000, 10.0)
+        self._trade(account_a, "600519", date(2026, 1, 15), "sell", 1000, 12.0)
+        self._trade(account_b, "600519", date(2026, 1, 6), "buy", 1000, 10.0)
+        self._trade(account_b, "600519", date(2026, 1, 16), "sell", 1000, 12.0)
+
+        single = self.performance_service.get_performance_report(
+            account_id=account_a, as_of=date(2026, 1, 16), include_realtime=False
+        )
+        closed = single["closed_trades"]
+        self.assertEqual(closed["count"], 1)
+        self.assertEqual(len(closed["items"]), 1)
+        self.assertEqual(closed["items"][0]["close_date"], "2026-01-15")
+
+        review_single = self.performance_service.get_sell_review(
+            account_id=account_a, as_of=date(2026, 1, 16)
+        )
+        self.assertEqual(len(review_single["items"]), 1)
+        self.assertEqual(review_single["items"][0]["close_date"], "2026-01-15")
+
+        # 全部账户视图行为不变：两笔都在
+        all_perf = self.performance_service.get_performance_report(
+            account_id=None, as_of=date(2026, 1, 16), include_realtime=False
+        )
+        self.assertEqual(all_perf["closed_trades"]["count"], 2)
+        all_review = self.performance_service.get_sell_review(account_id=None, as_of=date(2026, 1, 16))
+        self.assertEqual(len(all_review["items"]), 2)
+
     def test_closed_round_trip_stats(self) -> None:
         account_id = self._account()
         self.service.record_cash_ledger(

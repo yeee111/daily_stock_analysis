@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from src.services import runtime_scheduler as runtime_scheduler_module
 from src.services.runtime_scheduler import (
     CLI_SCHEDULER_OWNER_ENV,
     DEFAULT_RUNTIME_SCHEDULER_TIMEOUT_SECONDS,
@@ -125,6 +126,17 @@ def _successful_spawn_runner(result_queue, stock_codes, schedule_args_overrides)
 
 def _large_failure_spawn_runner(result_queue, stock_codes, schedule_args_overrides):
     result_queue.put({"success": False, "error": "x" * (1024 * 1024)})
+
+
+def _result_then_hang_spawn_runner(result_queue, stock_codes, schedule_args_overrides):
+    # 模拟生产现场：结果已 put，但遗留线程使进程退不出（join(2) 必然超时）
+    result_queue.put({"success": True, "error": None, "skipped": None})
+    time.sleep(30)
+
+
+def _silent_exit_spawn_runner(result_queue, stock_codes, schedule_args_overrides):
+    # 无结果且进程立即消失：真丢失，仍应判 worker_lost
+    return
 
 
 def _exit_with_live_descendant_spawn_runner(result_queue, stock_codes, schedule_args_overrides):
@@ -325,6 +337,52 @@ class RuntimeSchedulerServiceTestCase(unittest.TestCase):
         status = service.status()
         self.assertFalse(status["running"])
         self.assertIsNotNone(status["last_run_at"])
+        self.assertIsNotNone(status["last_success_at"])
+        self.assertIsNone(status["last_error"])
+
+    def _run_spawn_case(self, runner):
+        config = SimpleNamespace(
+            schedule_enabled=True,
+            schedule_time="18:00",
+            schedule_times=["18:00"],
+        )
+        service = RuntimeSchedulerService(config_provider=lambda: config)
+        service._analysis_process_target = runner
+        # 隔离网络/DB 副作用，只断言终局归类
+        service._run_screening_signal_bridge = lambda: None
+        service._run_paper_trading_after_analysis = lambda **kwargs: None
+        with patch.dict(os.environ, {"PAPER_TRADING_AUTO_RUN": "false"}, clear=False):
+            result = service.run_now()
+        self.assertTrue(result["accepted"])
+        deadline = time.monotonic() + 20
+        while service.status()["running"] and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(service.status()["running"])
+        return service
+
+    def test_result_preserved_when_worker_exit_hangs(self) -> None:
+        """有结果+退出挂起：按结果归类 SUCCESS，清理进程树，不丢结果不误判 worker_lost。"""
+        with patch(
+            "src.services.runtime_scheduler._terminate_analysis_process_tree",
+            wraps=runtime_scheduler_module._terminate_analysis_process_tree,
+        ) as terminate:
+            service = self._run_spawn_case(_result_then_hang_spawn_runner)
+        status = service.status()
+        self.assertIsNotNone(status["last_success_at"])
+        self.assertIsNone(status["last_error"])
+        self.assertTrue(terminate.called)  # 挂起进程仍被清理
+
+    def test_worker_lost_only_when_no_result_and_process_dead(self) -> None:
+        """无结果+进程消失：真丢失，保留 worker_lost 语义。"""
+        service = self._run_spawn_case(_silent_exit_spawn_runner)
+        status = service.status()
+        self.assertIsNone(status["last_success_at"])
+        self.assertIn("without a result", status["last_error"])
+
+    def test_result_with_clean_exit_still_success(self) -> None:
+        """有结果+正常退出：SUCCESS（回归对照）。"""
+        service = self._run_spawn_case(_successful_spawn_runner)
+        status = service.status()
         self.assertIsNotNone(status["last_success_at"])
         self.assertIsNone(status["last_error"])
 

@@ -109,4 +109,14 @@ export interface PerformanceMetrics {
 
   adviceBreakdown: Record<string, unknown>;
   diagnostics: Record<string, unknown>;
+
+  // 口径分离（2026-11-19）：交易胜率仅 long+completed；cash 三分类复用引擎 flat 中性带
+  tradeCompletedCount?: number;
+  tradeWinCount?: number;
+  tradeWinRatePct?: number;
+  tradeAvgSimulatedReturnPct?: number;
+  cashMissedUpCount?: number;
+  cashDodgedDownCount?: number;
+  cashFlatCorrectCount?: number;
+  neutralBandPct?: number;
 }

@@ -32,6 +32,7 @@ if sys.platform == "win32" and not mimetypes.inited:
         mimetypes.init()
 import os
 import re
+import time
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from pathlib import Path
@@ -238,6 +239,7 @@ def _load_runtime_scheduler_args() -> dict:
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Initialize and release shared services for the app lifecycle."""
+    app.state.runtime_started_at = time.time()
     runtime_owns_schedule = os.getenv(CLI_SCHEDULER_OWNER_ENV, "").strip().lower() not in {
         "1",
         "true",

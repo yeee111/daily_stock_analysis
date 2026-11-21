@@ -8,6 +8,8 @@ Examples:
     python scripts/paper_trading_run.py --signal-date 2026-10-31
     python scripts/paper_trading_run.py --account-id 1 --min-score 65
     python scripts/paper_trading_run.py --json
+    python scripts/paper_trading_run.py --all-accounts            # 所有 auto_run 分支账户，信号只取一次（干跑）
+    python scripts/paper_trading_run.py --all-accounts --apply    # 多账户执行
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, Dict, List
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -27,6 +30,9 @@ setup_env()
 
 from src.services.paper_trading_service import (  # noqa: E402
     DEFAULT_HORIZONS,
+    STATUS_ACCOUNT_FAILED,
+    STATUS_DATA_NOT_READY,
+    STATUS_DUPLICATE_BATCH,
     PaperTradingService,
 )
 
@@ -96,6 +102,70 @@ def _print_result(result: dict) -> None:
             print(f"⚠️  {warning}")
 
 
+def _print_multi_result(result: Dict[str, Any]) -> None:
+    """Print the per-account rows of ``--all-accounts`` (single run keeps ``_print_result``)."""
+
+    print("=" * 88)
+    print("DSA 决策信号 → 纸面多账户（信号只取一次）")
+    print("=" * 88)
+    print(f"状态：{result['status']}｜{'干跑' if result['dry_run'] else '执行'}")
+    print(result["message"])
+    print(f"批次：{result.get('batch_key')}")
+    batch = result.get("batch") or {}
+    if batch:
+        print(
+            f"信号日：{', '.join(batch.get('signal_dates') or []) or '—'}"
+            f"｜成交日：{batch.get('fill_date') or '—'}｜参考日：{batch.get('reference_date') or '—'}"
+            f"｜A 股日线最新：{batch.get('latest_data_date') or '—'}"
+        )
+    accounts: List[Dict[str, Any]] = list(result.get("accounts") or [])
+    if not accounts:
+        print("（没有 auto_run 分支账户，未运行任何账户）")
+    for row in accounts:
+        label = row.get("account_name") or row.get("label") or f"#{row.get('account_id')}"
+        profile = row.get("profile_name") or "env/default"
+        print(
+            f"- {label}（id={row.get('account_id')}，策略档 {profile}"
+            f"{'，auto_run' if row.get('auto_run') else '，手动'}）："
+            f"{row.get('status')}｜成交 {row.get('orders', 0)} 笔｜{row.get('message') or ''}"
+        )
+        for warning in row.get("warnings") or []:
+            print(f"    ⚠️  {warning}")
+    for warning in result.get("warnings") or []:
+        print(f"⚠️  {warning}")
+
+
+def _multi_exit_code(result: Dict[str, Any]) -> int:
+    statuses = [str(row.get("status") or "") for row in (result.get("accounts") or [])]
+    if STATUS_ACCOUNT_FAILED in statuses:
+        return 1
+    if statuses and all(row == STATUS_DUPLICATE_BATCH for row in statuses):
+        return 3
+    if STATUS_DATA_NOT_READY in statuses:
+        return 2
+    return 0
+
+
+def _multi_account_conflicts(args: argparse.Namespace) -> List[str]:
+    """``--all-accounts`` takes its parameters from each account's own profile."""
+
+    conflicts: List[str] = []
+    for key in (
+        "account_id",
+        "account_name",
+        "min_score",
+        "max_names",
+        "max_weight",
+        "signal_date",
+        "initial_cash",
+    ):
+        if getattr(args, key, None) is not None:
+            conflicts.append(f"--{key.replace('_', '-')}")
+    if (args.horizons or "").strip() != ",".join(DEFAULT_HORIZONS):
+        conflicts.append("--horizons")
+    return conflicts
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="DSA 决策信号 → 内置纸面账户（A 股）")
     parser.add_argument("--account-id", type=int, default=None, help="组合账户 ID")
@@ -108,14 +178,34 @@ def main(argv=None) -> int:
     parser.add_argument("--initial-cash", type=float, default=None, help="自动创建账户时的初始资金")
     parser.add_argument("--apply", action="store_true", help="真正写入纸面成交（默认干跑）")
     parser.add_argument("--force", action="store_true", help="同一成交日已有流水时仍继续")
+    parser.add_argument(
+        "--all-accounts",
+        action="store_true",
+        help="跑所有 auto_run 分支账户（信号只取一次，每账户按自己的策略档成账）；不加时行为与今天完全一致",
+    )
     parser.add_argument("--json", action="store_true", help="输出原始 JSON")
     args = parser.parse_args(argv)
+
+    service = PaperTradingService()
+
+    if args.all_accounts:
+        conflicts = _multi_account_conflicts(args)
+        if conflicts:
+            parser.error(
+                "--all-accounts 下策略参数来自各账户自己的策略档，不能同时指定：" + "、".join(conflicts)
+            )
+        multi = service.run_all_accounts(dry_run=not args.apply, force=args.force)
+        if args.json:
+            print(json.dumps(multi, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_multi_result(multi)
+        return _multi_exit_code(multi)
 
     import datetime as _dt
 
     signal_date = _dt.date.fromisoformat(args.signal_date) if args.signal_date else None
     horizons = [part.strip() for part in args.horizons.split(",") if part.strip()]
-    result = PaperTradingService().run(
+    result = service.run(
         account_id=args.account_id,
         account_name=args.account_name,
         horizons=horizons,

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, nativeTheme } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, nativeTheme, Tray } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -19,6 +19,27 @@ let electronAutoUpdaterConfigured = false;
 let electronUpdateCheckInFlight = false;
 let desktopUpdateCheckInFlight = false;
 let desktopBackendOrigin = '';
+let tray = null;
+let trayStatusTimer = null;
+let trayQuitRequested = false;
+let attachedBackend = false;
+let trayState = {
+  status: 'starting',
+  host: '127.0.0.1',
+  port: null,
+  attached: false,
+  schedulerEnabled: null,
+  nextRunAt: null,
+  processing: 0,
+  pending: 0,
+};
+const TRAY_STATUS_POLL_INTERVAL_MS = 15000;
+const DESKTOP_UPDATE_CHECK_ARG = '--dsa-desktop-update-check';
+const DESKTOP_UPDATE_CHECK_ENV = 'DSA_DESKTOP_UPDATE_CHECK';
+const DESKTOP_ATTACH_PROBE_TIMEOUT_MS = 800;
+const DESKTOP_ATTACH_PROBE_PORTS = Object.freeze([8000, 8001, 8002, 8003, 8004, 8005, 8006, 8007, 8008, 8009, 8010]);
+const TRAY_ICON_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACtklEQVR4nMVXS2sUQRD+qqdXNrubaDZoiIe4iiJ4EP+BokFvXiTgKXjRYwTJwYM/wIuCeBRPggdz8yj6H8SDIEoMewlRzIN9hLAzXVI1+5h9uGFne7Ggoaeqp7/q6q+LKkIsBoDLnzo7jxCPANwG+CIAgh9hgL4BeA+L57VfP7dbmNSa5IqlmwS8IjKLzBz/41UIRARmV2bgfn1n84Ng6wnzc4s3CPYjCyhz1HTK1+lbIidyIAoIBEa4VPtT/kSFwvmTnAk/g2gBYAcg8AZJzTNoRNsSAWTAvEUNe8XwscYaGXPaK3gLuNGIR1KnGOwEU7ANGMscu+gn5HLPh4c6NcU5HSKq6zhBislYpnyx5I9tAhCGMLNFnHj6AvbcBVWHG9+x9/gh3O4OYG3XlRivdDcBXLWC3J27yF6/CprK6pC56MQmaxLC1j/b4+24Hmo02vOELbnYpsYxEryEONdvb91579qE2FTgwh8JJzU3ZgeayqXayqb6yzFm1p4gc+myfja+fkHl5bPYRpN0IAjg9nZRuPcA06urcPsHqs4uXUO0vYXam9egIJhkBEhPL89MiMWVfdVyJqO6now3pgNmCMmE3WJvPSmZNxnvxwE+gmSdjDZcl9oB549kozkQ+CfZaA7AP8lGdMA/yY4SM1DrkWTpHGAerhvXfuQVWBu/exd1coDofNn/7QBrnSqFA+UsqHFctTLXYqJ5DantWgNznwPcft1RBDM9g/q7twjmF7rygOgol9fvtHbZWzCSJ6aBJZlkwoN6fyZMVLlj2RNC+dkzGzCmhLgbMSMVHOnt0h8QnNs0IKxLz9J3OUqixOiV8eysmIT1yTYmg6W7MalWf/yGcSskISEScGGJ/5wb7xlpayZYxq0ItlyUkR7NsbsF5jKR5N9JpD2BNYFgCJZgtpvT/9me/wWZ/pZOJPhanQAAAABJRU5ErkJggg==';
 
 function resolveWindowBackgroundColor() {
   return nativeTheme.shouldUseDarkColors ? '#08080c' : '#f4f7fb';
@@ -1337,6 +1358,30 @@ function resolveDesktopVersion() {
   return String(app.getVersion() || '').trim();
 }
 
+function readPackagedAppMetadata() {
+  try {
+    const packagePath = path.join(app.getAppPath(), 'package.json');
+    const parsed = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function isUpdateCheckDisabled() {
+  const override = String(process.env[DESKTOP_UPDATE_CHECK_ENV] || '').trim().toLowerCase();
+  if (['1', 'true', 'on', 'yes'].includes(override)) {
+    return false;
+  }
+  if (['0', 'false', 'off', 'no'].includes(override)) {
+    return true;
+  }
+  if (process.argv.includes('--no-update-check')) {
+    return true;
+  }
+  return String(readPackagedAppMetadata().dsaUpdateCheck || '').trim().toLowerCase() === 'off';
+}
+
 function buildMainPageUrl(port, timestamp = Date.now(), host = DESKTOP_BACKEND_DEFAULT_HOST) {
   const url = new URL(buildBackendUrl(host, port, '/'));
   url.searchParams.set('desktop_version', resolveDesktopVersion() || 'unknown');
@@ -1810,6 +1855,9 @@ async function performElectronUpdaterCheck({ manual = false } = {}) {
 }
 
 async function performDesktopUpdateCheck({ manual = false, notify = false } = {}) {
+  if (isUpdateCheckDisabled()) {
+    return desktopUpdateState;
+  }
   if (canUseElectronAutoUpdater()) {
     return performElectronUpdaterCheck({ manual, notify });
   }
@@ -1880,6 +1928,257 @@ ipcMain.handle('desktop:render-share-image', async (event, recordId) => {
   }
 });
 
+function trayStatusLabel() {
+  if (trayState.status === 'running') {
+    return '运行中';
+  }
+  if (trayState.status === 'offline') {
+    return '无法连接';
+  }
+  return '启动中';
+}
+
+function formatTrayNextRun(value) {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  const pad = (part) => String(part).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function buildTrayMenuTemplate() {
+  const address = trayState.port ? ` · ${trayState.host}:${trayState.port}` : '';
+  const attachedSuffix = trayState.attached ? '（已连接本机服务）' : '';
+  const nextRun = formatTrayNextRun(trayState.nextRunAt);
+  const schedulerLabel = trayState.schedulerEnabled === null
+    ? '定时任务：-'
+    : `定时任务：${trayState.schedulerEnabled ? '已启用' : '未启用'}${nextRun ? ` · 下次 ${nextRun}` : ''}`;
+  return [
+    { label: '打开 DSA 主界面', click: () => showMainWindow() },
+    { label: '查看运行状态', click: () => showMainWindow({ route: '/runtime' }) },
+    {
+      label: '在浏览器中打开',
+      click: () => {
+        if (desktopBackendOrigin) {
+          void shell.openExternal(desktopBackendOrigin);
+        }
+      },
+    },
+    { type: 'separator' },
+    { label: `后端服务：${trayStatusLabel()}${address}${attachedSuffix}`, enabled: false },
+    { label: schedulerLabel, enabled: false },
+    { label: `任务队列：处理中 ${trayState.processing} · 等待 ${trayState.pending}`, enabled: false },
+    { type: 'separator' },
+    { label: '刷新状态', click: () => { void refreshTrayStatus(); } },
+    {
+      label: trayState.attached ? '退出（保留已在运行的服务）' : '退出（停止后台服务）',
+      click: () => quitDesktopApp(),
+    },
+  ];
+}
+
+function updateTrayPresentation() {
+  if (!tray) {
+    return;
+  }
+  try {
+    const nextRun = formatTrayNextRun(trayState.nextRunAt);
+    const parts = ['DSA', trayStatusLabel()];
+    if (trayState.port) {
+      parts.push(`${trayState.host}:${trayState.port}`);
+    }
+    if (nextRun) {
+      parts.push(`下次 ${nextRun}`);
+    }
+    tray.setToolTip(parts.join(' · '));
+    tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate()));
+  } catch (error) {
+    logLine(`[tray] failed to refresh tray presentation: ${error.message}`);
+  }
+}
+
+function createTray() {
+  if (tray || typeof Tray !== 'function' || typeof nativeImage?.createFromDataURL !== 'function') {
+    return;
+  }
+  try {
+    const icon = nativeImage.createFromDataURL(`data:image/png;base64,${TRAY_ICON_PNG_BASE64}`);
+    tray = new Tray(icon);
+    tray.setToolTip('DSA 股票分析平台');
+    tray.on('click', () => {
+      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
+        showMainWindow();
+        return;
+      }
+      mainWindow.hide();
+    });
+    updateTrayPresentation();
+  } catch (error) {
+    logLine(`[tray] failed to create tray: ${error.message}`);
+    tray = null;
+  }
+}
+
+function showMainWindow({ route = '' } = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  try {
+    if (typeof mainWindow.isMinimized === 'function' && mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.show();
+    mainWindow.focus();
+    if (route && desktopBackendOrigin) {
+      void mainWindow.loadURL(new URL(route, desktopBackendOrigin).toString());
+    }
+  } catch (error) {
+    logLine(`[tray] failed to show main window: ${error.message}`);
+  }
+}
+
+function quitDesktopApp() {
+  trayQuitRequested = true;
+  stopTrayStatusPolling();
+  app.quit();
+}
+
+function fetchBackendJson(url, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(value);
+    };
+
+    let request;
+    try {
+      request = http.get(url, (response) => {
+        if (response.statusCode !== 200) {
+          response.resume();
+          finish(null);
+          return;
+        }
+        if (typeof response.setEncoding !== 'function') {
+          finish(null);
+          return;
+        }
+        let body = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+          if (body.length < 512 * 1024) {
+            body += chunk;
+          }
+        });
+        response.on('end', () => {
+          try {
+            finish(JSON.parse(body));
+          } catch (_error) {
+            finish(null);
+          }
+        });
+      });
+    } catch (_error) {
+      finish(null);
+      return;
+    }
+    request.setTimeout(timeoutMs, () => {
+      request.destroy();
+      finish(null);
+    });
+    request.on('error', () => finish(null));
+  });
+}
+
+function isAttachExistingBackendEnabled() {
+  const raw = String(process.env.DSA_DESKTOP_ATTACH_EXISTING || '').trim().toLowerCase();
+  return !['0', 'false', 'no', 'off'].includes(raw);
+}
+
+async function findRunningDsaBackend({ host = DESKTOP_BACKEND_DEFAULT_HOST, ports = DESKTOP_ATTACH_PROBE_PORTS } = {}) {
+  if (!isAttachExistingBackendEnabled()) {
+    return null;
+  }
+
+  const probes = await Promise.all(ports.map(async (port) => {
+    const snapshot = await fetchBackendJson(
+      buildBackendUrl(host, port, '/api/v1/runtime/overview'),
+      DESKTOP_ATTACH_PROBE_TIMEOUT_MS
+    );
+    return snapshot && snapshot.process && snapshot.scheduler ? { port, snapshot } : null;
+  }));
+
+  return probes.filter(Boolean).sort((left, right) => left.port - right.port)[0] || null;
+}
+
+async function refreshTrayStatus() {
+  if (!tray) {
+    return;
+  }
+  if (!trayState.port) {
+    trayState = { ...trayState, status: 'starting' };
+    updateTrayPresentation();
+    return;
+  }
+
+  const snapshot = await fetchBackendJson(
+    buildBackendUrl(trayState.host, trayState.port, '/api/v1/runtime/overview')
+  );
+  if (!snapshot || !snapshot.scheduler) {
+    trayState = { ...trayState, status: 'offline' };
+  } else {
+    trayState = {
+      ...trayState,
+      status: 'running',
+      schedulerEnabled: Boolean(snapshot.scheduler.enabled),
+      nextRunAt: snapshot.scheduler.next_run_at || null,
+      processing: Number(snapshot.task_queue?.stats?.processing || 0),
+      pending: Number(snapshot.task_queue?.stats?.pending || 0),
+    };
+  }
+  updateTrayPresentation();
+}
+
+function startTrayStatusPolling() {
+  if (!tray) {
+    return;
+  }
+  stopTrayStatusPolling();
+  void refreshTrayStatus();
+  trayStatusTimer = setInterval(() => {
+    void refreshTrayStatus();
+  }, TRAY_STATUS_POLL_INTERVAL_MS);
+}
+
+function stopTrayStatusPolling() {
+  if (trayStatusTimer) {
+    clearInterval(trayStatusTimer);
+    trayStatusTimer = null;
+  }
+}
+
+function setTrayBackendEndpoint(origin) {
+  try {
+    const parsed = new URL(origin);
+    trayState.host = parsed.hostname || DESKTOP_BACKEND_DEFAULT_HOST;
+    trayState.port = parsed.port ? Number(parsed.port) : 80;
+  } catch (_error) {
+    return;
+  }
+  if (tray) {
+    void refreshTrayStatus();
+    startTrayStatusPolling();
+  }
+}
+
 async function createWindow() {
   desktopBackendOrigin = '';
   const restoreResult = isWindowsNsisInstalledApp() ? restorePackagedRuntimeStateFromBackup() : null;
@@ -1924,10 +2223,22 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      additionalArguments: [`--dsa-desktop-version=${app.getVersion()}`],
+      additionalArguments: [
+        `--dsa-desktop-version=${app.getVersion()}`,
+        `--dsa-desktop-update-check=${isUpdateCheckDisabled() ? '0' : '1'}`,
+      ],
     },
   });
   logStartup('BrowserWindow created');
+
+  mainWindow.on('close', (event) => {
+    if (!tray || trayQuitRequested) {
+      return;
+    }
+    event.preventDefault();
+    mainWindow.hide();
+  });
+  createTray();
 
   const loadingPath = path.join(__dirname, 'renderer', 'loading.html');
   const loadingPageStartedAt = Date.now();
@@ -1979,25 +2290,39 @@ async function createWindow() {
   logStartup(`Backend bind host=${backendBindHost}; desktop connect host=${backendConnectHost}`);
 
   const portFindStartedAt = Date.now();
-  const port = await findAvailablePort(8000, 8100, backendBindHost);
-  logStartup(`Using port ${port} (selected in ${Date.now() - portFindStartedAt}ms)`);
+  const attachTarget = await findRunningDsaBackend({ host: backendConnectHost });
+  let port = 0;
+  if (attachTarget) {
+    port = attachTarget.port;
+    attachedBackend = true;
+    trayState = { ...trayState, attached: true };
+    logStartup(`Attached to existing DSA backend on port ${port} in ${Date.now() - portFindStartedAt}ms`);
+  } else {
+    port = await findAvailablePort(8000, 8100, backendBindHost);
+    logStartup(`Using port ${port} (selected in ${Date.now() - portFindStartedAt}ms)`);
+  }
   desktopBackendOrigin = new URL(buildBackendUrl(backendConnectHost, port)).origin;
+  setTrayBackendEndpoint(desktopBackendOrigin);
   logStartup(`App directory=${appDir}`);
 
   const dbPath = path.join(appDir, 'data', 'stock_analysis.db');
   const logDir = path.join(appDir, 'logs');
 
-  try {
-    const launchInfo = startBackend({ port, envFile: envPath, dbPath, logDir, host: backendBindHost });
-    logStartup(`Backend launch mode=${launchInfo.mode}`);
-    logStartup(`Backend launch command=${launchInfo.command}`);
-    logStartup(`Backend launch cwd=${launchInfo.cwd}`);
-    logStartup('Waiting for backend health check');
-  } catch (error) {
-    logStartup(`Backend launch failed: ${String(error)}`);
-    const errorUrl = `file://${loadingPath}?error=${encodeURIComponent(String(error))}`;
-    await mainWindow.loadURL(errorUrl);
-    return;
+  if (!attachedBackend) {
+    try {
+      const launchInfo = startBackend({ port, envFile: envPath, dbPath, logDir, host: backendBindHost });
+      logStartup(`Backend launch mode=${launchInfo.mode}`);
+      logStartup(`Backend launch command=${launchInfo.command}`);
+      logStartup(`Backend launch cwd=${launchInfo.cwd}`);
+      logStartup('Waiting for backend health check');
+    } catch (error) {
+      logStartup(`Backend launch failed: ${String(error)}`);
+      const errorUrl = `file://${loadingPath}?error=${encodeURIComponent(String(error))}`;
+      await mainWindow.loadURL(errorUrl);
+      return;
+    }
+  } else {
+    logStartup('Skipping backend launch: reusing the backend that is already running');
   }
 
   const healthUrl = buildBackendUrl(backendConnectHost, port, '/api/health');
@@ -2047,6 +2372,9 @@ async function createWindow() {
       250,
       1500,
       () => {
+        if (attachedBackend) {
+          return null;
+        }
         if (backendStartError) {
           return `backend start error: ${backendStartError.message}`;
         }
@@ -2069,7 +2397,8 @@ async function createWindow() {
     await mainWindow.loadURL(mainPageUrl);
     logStartup(`Main page loadURL resolved in ${Date.now() - mainPageStartedAt}ms url=${mainPageUrl}`);
     logStartup(`Main UI loaded in ${Date.now() - startupStartedAt}ms`);
-    if (!restoreFailed) {
+    void refreshTrayStatus();
+    if (!restoreFailed && !isUpdateCheckDisabled()) {
       void performDesktopUpdateCheck({ notify: true });
     }
   } catch (error) {
@@ -2079,24 +2408,43 @@ async function createWindow() {
   }
 }
 
-app.whenReady().then(createWindow);
+const hasSingleInstanceLock = typeof app.requestSingleInstanceLock === 'function'
+  ? app.requestSingleInstanceLock()
+  : true;
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  if (typeof app.on === 'function') {
+    app.on('second-instance', () => showMainWindow());
   }
-});
 
-app.on('window-all-closed', () => {
-  void stopBackend();
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+  app.whenReady().then(createWindow);
 
-app.on('before-quit', () => {
-  void stopBackend();
-});
+  app.on('activate', () => {
+    showMainWindow();
+  });
+
+  app.on('window-all-closed', () => {
+    if (tray && !trayQuitRequested) {
+      return;
+    }
+    void stopBackend();
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  app.on('before-quit', () => {
+    trayQuitRequested = true;
+    stopTrayStatusPolling();
+    if (tray) {
+      tray.destroy();
+      tray = null;
+    }
+    void stopBackend();
+  });
+}
 
 module.exports = {
   DEFAULT_REQUEST_TIMEOUT_MS,
@@ -2120,6 +2468,13 @@ module.exports = {
   fetchLatestReleaseJson,
   findAvailablePort,
   buildMainPageUrl,
+  buildTrayMenuTemplate,
+  findRunningDsaBackend,
+  isUpdateCheckDisabled,
+  TRAY_STATUS_POLL_INTERVAL_MS,
+  __setTrayStateForTest(nextState = {}) {
+    trayState = { ...trayState, ...nextState };
+  },
   buildDesktopShareImageUrl,
   migrateMacPackagedRuntimeState,
   normalizeVersionString,

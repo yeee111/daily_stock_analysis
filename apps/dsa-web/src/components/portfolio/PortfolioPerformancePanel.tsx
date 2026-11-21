@@ -1,5 +1,5 @@
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CartesianGrid,
   Legend,
@@ -24,6 +24,7 @@ type PerformancePanelProps = {
   asOf?: string | null;
   costMethod: PortfolioCostMethod;
   includeRealtime?: boolean;
+  refreshToken?: number;
 };
 
 type CurveDatum = {
@@ -62,6 +63,7 @@ export const PortfolioPerformancePanel: React.FC<PerformancePanelProps> = ({
   asOf = null,
   costMethod,
   includeRealtime = false,
+  refreshToken,
 }) => {
   const { language } = useUiLanguage();
   const text = PORTFOLIO_PERFORMANCE_TEXT[language];
@@ -72,9 +74,14 @@ export const PortfolioPerformancePanel: React.FC<PerformancePanelProps> = ({
   const [quotesNotice, setQuotesNotice] = useState<string | null>(null);
   const [quotesError, setQuotesError] = useState<string | null>(null);
   const [useRealtime, setUseRealtime] = useState(includeRealtime);
+  const useRealtimeRef = useRef(useRealtime);
+
+  useEffect(() => {
+    useRealtimeRef.current = useRealtime;
+  }, [useRealtime]);
 
   const loadPerformance = useCallback(async (options?: { realtime?: boolean }) => {
-    const realtime = options?.realtime ?? useRealtime;
+    const realtime = options?.realtime ?? useRealtimeRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -92,11 +99,21 @@ export const PortfolioPerformancePanel: React.FC<PerformancePanelProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [accountId, asOf, costMethod, useRealtime]);
+  }, [accountId, asOf, costMethod]);
 
   useEffect(() => {
     void loadPerformance();
   }, [loadPerformance]);
+
+  const appliedRefreshToken = useRef(refreshToken);
+  useEffect(() => {
+    if (refreshToken === appliedRefreshToken.current) {
+      return;
+    }
+    appliedRefreshToken.current = refreshToken;
+    setUseRealtime(true);
+    void loadPerformance({ realtime: true });
+  }, [refreshToken, loadPerformance]);
 
   const refreshQuotes = useCallback(async () => {
     setSyncingQuotes(true);
@@ -294,8 +311,8 @@ export const PortfolioPerformancePanel: React.FC<PerformancePanelProps> = ({
                     </tr>
                   </thead>
                   <tbody>
-                    {openPositions.items.map((row) => (
-                      <tr key={`${row.market}-${row.stockCode}`} className="border-b border-white/5">
+                    {openPositions.items.map((row, idx) => (
+                      <tr key={`${row.market}-${row.stockCode}-${idx}`} className="border-b border-white/5">
                         <td className="py-2 pr-2 font-mono text-foreground">{row.stockCode}</td>
                         <td className="py-2 pr-2 text-xs text-secondary">{row.openDate}</td>
                         <td className="py-2 pr-2 text-right">{row.holdingDays}</td>
@@ -345,8 +362,8 @@ export const PortfolioPerformancePanel: React.FC<PerformancePanelProps> = ({
                       </tr>
                     </thead>
                     <tbody>
-                      {closed.items.map((row) => (
-                        <tr key={`${row.market}-${row.stockCode}-${row.closeDate}`} className="border-b border-white/5">
+                      {closed.items.map((row, idx) => (
+                        <tr key={`${row.market}-${row.stockCode}-${row.closeDate}-${idx}`} className="border-b border-white/5">
                           <td className="py-2 pr-2 font-mono text-foreground">{row.stockCode}</td>
                           <td className="py-2 pr-2 text-xs text-secondary">{row.openDate}</td>
                           <td className="py-2 pr-2 text-xs text-secondary">{row.closeDate}</td>

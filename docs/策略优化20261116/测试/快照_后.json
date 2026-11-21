@@ -1,0 +1,38 @@
+{
+  "库文件": {
+    "stock_analysis.db": {
+      "存在": true,
+      "大小": 32178176,
+      "sha256": "8155a971255cffc32596ffab0acb21874f08f3aea4239fa770a10523ddea53a7"
+    },
+    "stock_analysis.db-wal": {
+      "存在": true,
+      "大小": 4313672,
+      "sha256": "64bca420f29bf56d1ff13dc3b067e60a17582929b3ac46c932abe227c0a474f9"
+    },
+    "stock_analysis.db-shm": {
+      "存在": true,
+      "大小": 32768,
+      "sha256": "8d60c3f00b9122e6d5522fff963a4d6446bf0693f2954cfa1e56a43f5b8b1ba8"
+    }
+  },
+  "表行数": {
+    "portfolio_trades": 36,
+    "decision_signals": 400,
+    "paper_account_runs": 115,
+    "portfolio_positions": 8,
+    "stock_daily": 12094,
+    "portfolio_accounts": 2,
+    "paper_strategy_profiles": 1
+  },
+  "表内容哈希": {
+    "portfolio_trades": "61ec0796344a0a5f276bddc26eb624bc634247895b577d3803e5b6427b23b0a8",
+    "decision_signals": "5596d6a8cd13c691dcea853e349d8db16597fa741699853de3a9da61cebee6ec",
+    "paper_account_runs": "0985a0e56f8b6a62ee59443006f31a0e6ffe1f9feabeb1ffaa59be84a971b355",
+    "portfolio_positions": "1b68d3df97e26ae272b7fbcd4f3d5c692cbecdf4b7823403db9232ed5f903c71",
+    "stock_daily": "7f2bdfb3573af28171815c61ff3a016b39b339b04cccb281c5be47ef7932481c",
+    "portfolio_accounts": "f0e52d2faa928eb8e1d1a425d51ef5780c3a5e143bea7fc7969a987324965e7d",
+    "paper_strategy_profiles": "5945bd4a5cf84dbf6ab3de64846e72205accfa5181e3ffb0a8e6aa1305b60dcc"
+  },
+  "窗口内成交笔数": 32
+}

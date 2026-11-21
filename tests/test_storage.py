@@ -2390,5 +2390,64 @@ class TestStorage(unittest.TestCase):
             Config.reset_instance()
             self._cleanup_temp_dir(db_dir)
 
+    def test_paper_branch_role_migration_adds_column_and_backfills_once(self) -> None:
+        """legacy paper_account_branches：补 role 列，主干 live / fork control；只回填一次。"""
+        DatabaseManager.reset_instance()
+        temp_dir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(temp_dir.name, "legacy_paper_branch.db")
+
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "CREATE TABLE paper_account_branches ("
+                    "account_id INTEGER PRIMARY KEY, parent_account_id INTEGER, "
+                    "fork_date DATE NOT NULL, profile_id INTEGER, label VARCHAR(64), "
+                    "auto_run BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME)"
+                )
+                conn.execute(
+                    "INSERT INTO paper_account_branches "
+                    "(account_id, parent_account_id, fork_date, auto_run) "
+                    "VALUES (1, NULL, '2026-11-02', 1)"
+                )
+                conn.execute(
+                    "INSERT INTO paper_account_branches "
+                    "(account_id, parent_account_id, fork_date, auto_run) "
+                    "VALUES (2, 1, '2026-11-06', 0)"
+                )
+                conn.commit()
+
+            manager = DatabaseManager(db_url=f"sqlite:///{db_path}")
+            with sqlite3.connect(db_path) as conn:
+                roles = dict(
+                    conn.execute(
+                        "SELECT account_id, role FROM paper_account_branches ORDER BY account_id"
+                    ).fetchall()
+                )
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(paper_account_branches)")}
+            self.assertIn("role", columns)
+            self.assertEqual(roles, {1: "live", 2: "control"})
+
+            # 转正后的 fork 必须保持 live：重启迁移不得把它改回 control
+            with sqlite3.connect(db_path) as conn:
+                conn.execute("UPDATE paper_account_branches SET role = 'live' WHERE account_id = 2")
+                conn.commit()
+            self._dispose_engine(manager)
+            DatabaseManager.reset_instance()
+            DatabaseManager(db_url=f"sqlite:///{db_path}")
+            with sqlite3.connect(db_path) as conn:
+                roles_again = dict(
+                    conn.execute(
+                        "SELECT account_id, role FROM paper_account_branches ORDER BY account_id"
+                    ).fetchall()
+                )
+            self.assertEqual(roles_again, {1: "live", 2: "live"})
+        finally:
+            DatabaseManager.reset_instance()
+            Config.reset_instance()
+            try:
+                temp_dir.cleanup()
+            except PermissionError:
+                pass
+
 if __name__ == '__main__':
     unittest.main()

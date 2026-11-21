@@ -103,6 +103,7 @@ $hiddenImports = @(
   'api.v1.endpoints.stocks',
   'api.v1.endpoints.health',
   'api.v1.endpoints.screening',
+  'api.v1.endpoints.runtime',
   'src.services.screening',
   'src.services.screening.pipeline',
   'api.v1.schemas',

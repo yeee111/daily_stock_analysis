@@ -54,7 +54,7 @@
 
 ## 止盈止损
 
-建仓成交的 `note` 里记了开仓信号 id（`paper trading: signal #N`）。持仓后每次运行都会回读该信号的 `stop_loss` / `target_price`，作为常驻委托挂在持仓上：
+建仓成交的 `note` 里记了开仓信号 id（`paper trading: signal #N`）。持仓后每次运行都会回读该信号的 `stop_loss` / `target_price`，作为常驻委托挂在持仓上。策略档配置了 `exit.stop_loss_pct` / `exit.take_profit_pct` 时，同一套规则改用「最近买入价 × (1 ± 比例)」的价位，覆盖信号价位：
 
 - 当日最低价 ≤ 止损价 → 卖出全部持仓；成交价取 `min(开盘价, 止损价)`，跳空低开时按更差的开盘价成交
 - 当日最高价 ≥ 目标价 → 卖出全部持仓；成交价取 `max(开盘价, 目标价)`，跳空高开时按更好的开盘价成交
@@ -63,7 +63,20 @@
 - 当天已经因信号卖出（清仓/减半）的标的不会在同一开盘再被止盈止损或新买入信号重复开仓
 - 止损单的 `trade_uid` 带 `-exit` 后缀（`paper-<成交日>-<代码>-sell-exit`），不会和同日信号卖单冲突
 
-信号被重新评估后以最新一版为准；取不到信号或信号里的价位为空时该持仓不设止盈止损。
+信号被重新评估后以最新一版为准；取不到信号或信号里的价位为空时该持仓不设止盈止损。常驻委托在**每个交易日**都参与计划，包括有新信号批次的日子（信号日）；只有当标的当天已被信号卖单清掉时才跳过。
+
+### 时间止盈（持有到期）
+
+策略档 `exit.max_holding_days`（正整数，默认不启用）给持仓加一道时间出口：从最近一次买入的次日开始数，**持有满 N 个交易日**后，在当天的开盘卖出全部持仓。
+
+- 口径：买入日不计入天数；中间跨周末/节假日按交易日历只数交易日。例如周一买入、`max_holding_days=3`，则周四开盘卖出（周二/周三/周四为 3 个交易日）
+- 成交顺序：**信号卖出 → 时间止盈 → 盘中止盈止损**。时间止盈按开盘价成交，因此先于当日的盘中触发；当天已被信号卖单清掉的标的不再重复卖
+- 开盘跌停、停牌、流动性上限导致卖不出时保留持仓，计划里标明原因，下一个交易日继续判断（不会因为某一天卖不出就放弃）
+- 卖出 `trade_uid` 带 `-time_exit` 后缀（`paper-<成交日>-<代码>-sell-time_exit`），与信号卖单、`-exit` 常驻委托互不冲突；成交 `note` 追加 `[time_exit]` 标记
+- 交易日历不可用时不做时间止盈并写 warning（宁可不动，也不按错误天数强平）
+- 计划审计 `max_holding_days` 记录本次生效值，便于事后核对
+
+时间止盈解决的是「信号 horizon（如 3d）到期后仓位无限期扛单」：同一批信号在回放里，持有 3 日与持有 10 日的收益差远大于止盈位本身的差异。
 
 ## 持仓止损体检
 
@@ -128,6 +141,91 @@
 - 本次新登记的条目在响应的 `corporate_actions` 里（人类可读，如 `600519 2026-06-26 每股派 28.0242 元`），`/portfolio` 卡片也会列出
 - 拉取失败只记 warning，不影响下单
 
+## 多账户与账户分支（Phase 1）
+
+一个纸面账户就是一条独立账本；「分支」只描述它从哪个账户、哪一天分叉而来。Phase 1 的语义：
+
+- 所有账户共享同一批决策信号：每次跑批只构建一次 `SignalBatch`（含补跑路径），账户数量不影响信号读取次数；
+- 克隆账户在 fork 日与源账户逐字段一致，之后各账户独立发展、互不同步；
+- 每个账户按自己的策略档（policy profile）执行，可以在同一批次上得出不同委托；
+- 支持同时存在多个分支账户，跑批按 `account_id` 升序串行，SQLite 单写锁下不会互相踩写。
+
+### 数据结构
+
+| 表 | 作用 |
+| --- | --- |
+| `paper_strategy_profiles` | 命名策略档：`name` + `version` 唯一，`config_json` 固定三段 `entry` / `exit` / `risk` |
+| `paper_account_branches` | 每个纸面账户一行：`parent_account_id`（主干为 NULL）、`fork_date`、`profile_id`、`label`、`auto_run` |
+| `paper_account_runs` | 每次跑批每账户一行的审计：`batch_key`、`status`、策略档快照、`signal_ids`、`orders_json`、`error` |
+
+三张表由服务启动时的 `Base.metadata.create_all` 自愈创建，不需要手写迁移；老库首次启动会为已有的纸面账户回填 branch 行与默认档，回填是幂等的，不会给主干账户写入非空策略。
+
+### 克隆一个账户
+
+```bash
+# 默认 dry-run：先只读备份真实库到临时文件，在临时副本里建账户、复制、校验
+python scripts/paper_trading_clone.py --name 纸面策略B --fork-date 2026-11-13
+
+# 确认后真正写入；--profile-name 省略时用 default 档
+python scripts/paper_trading_clone.py --source-account-id 2 --name 纸面策略B \
+    --fork-date 2026-11-13 --profile-name branch-a --initial-cash 50000 --apply
+```
+
+- **dry-run 是默认值**：真实库以只读方式备份到临时文件，全部写入发生在该副本，输出里会打印源/克隆两边的快照比对；真实库一个字节都不写。
+- `--apply` 才写真实库，写前打印待写内容；非交互终端下显式 `--apply` 视为确认。
+- 复制的是**事件表**：`portfolio_trades`、`portfolio_cash_ledger`、`portfolio_corporate_actions` 中 `<= fork_date` 的行；`portfolio_positions`、`portfolio_position_lots`、`portfolio_daily_snapshots` 等派生表不复制，由回放重算。
+- `fork_date` 会归一为「小于等于它的最后一个交易日」；交易日历不可用时沿用原值并在输出里说明。
+- 拒绝的情况：源账户 `broker` 不是 `paper`、源账户没有任何事件、`fork_date` 早于首次活动、同名克隆已存在但 fork 日不同、名称已被无关账户占用、`fork_date` 晚于源账户最后成交日（除非 `--allow-future-fork`）。
+- 幂等：同名且同 fork 日重复执行直接返回已有克隆，不新增任何行。
+- 事务：建账户、复制三表、写 branch 行在同一个 `BEGIN IMMEDIATE` 事务内完成；省略 `--profile-id/--profile-name` 且库里还没有 `default` 档时，该档也在这个事务里创建（解析阶段只返回「待创建」，不会先写一行造成克隆失败后的孤立策略档）；行级自检（行数、逐行字段、金额精度）不通过则整体回滚，不留半个账户。
+- 提交后校验：源账户与克隆账户各按 `as_of=fork_date` 跑一次 `get_portfolio_snapshot`，比对现金、权益、已实现盈亏、费用、税费（`round(,6)`）与持仓数量/成本（`round(,8)`）；不通过则补偿删除新账户的全部行并报错退出。
+- `--initial-cash` 在 fork 之后的下一个交易日注入现金，不参与上述快照比对。
+- 克隆不重算出场位（Phase 2）：fork 时已有的持仓沿用建仓信号里的绝对止损/目标价，或按所属账户策略档的 `exit.stop_loss_pct` / `exit.take_profit_pct` 在每次跑批时按该账户自己的最近买入价换算——两个账户因此可能得出不同价位，但「按 fork 时点分支成本把止盈止损位落库固定」属于后续阶段。
+
+### 策略档
+
+`config_json` 只有以下字段在当前阶段生效，缺省一律回退「环境变量 → 内置默认」：
+
+| 段 | 字段 | 含义 |
+| --- | --- | --- |
+| `entry` | `horizons` | 信号周期，如 `"3d,5d"` |
+| `entry` | `min_score` | 买入最低评分 |
+| `entry` | `max_names` | 最多持有只数 |
+| `entry` | `max_weight` | 单票最大权重 |
+| `entry` | `initial_cash` | 自动建账户时的初始资金 |
+| `risk` | `retry_days` / `catchup_days` | 未成交顺延天数 / 单次补跑上限 |
+| `risk` | `slippage_bps` / `max_adv_pct` / `adv_window_days` | 滑点与流动性约束 |
+| `exit` | `stop_loss_pct` / `take_profit_pct` | 按最近一次买入价换算的固定止损/止盈比例（`0 < x < 1`），覆盖信号自带的绝对价位；某一侧留空则回退信号值（移动止损、分批止盈、再入场冷却属于后续阶段） |
+| `exit` | `max_holding_days` | 正整数，持有满 N 个交易日后在开盘卖出（时间止盈）；不配置则不做时间出口。语义见「时间止盈（持有到期）」 |
+
+优先级为「显式调用参数 > 策略档 > 环境变量 > 内置默认」。未知字段忽略并给 warning；比例越界或非数字只告警并回退信号止损/止盈，不抛错；`config_json` 损坏时降级为空档，行为与单账户默认完全一致，不会让跑批崩溃。出场来源会写进计划审计（`exit_levels.<code>.source`，`profile`/`signal`）与卖出原因文案。
+
+Phase 1 还没有策略档的 Web/API 写入口，用仓库层创建：
+
+```python
+from src.repositories.portfolio_repo import PortfolioRepository
+from src.storage import DatabaseManager
+
+repo = PortfolioRepository(DatabaseManager.get_instance())
+repo.create_profile(
+    name="branch-a",
+    config={
+        "entry": {"horizons": "3d,5d", "min_score": 65, "max_names": 4, "max_weight": 0.25},
+        "exit": {"stop_loss_pct": 0.08, "take_profit_pct": 0.20},
+    },
+)
+```
+
+### 自动跑批与开关
+
+- `PAPER_TRADING_AUTO_RUN=true` 时，定时触发改为「构建一次信号批次 → 遍历 `auto_run=true` 的分支账户逐个成账」。
+- 克隆出来的账户 `auto_run` 默认是 `false`：先观察，确认要参赛再把 `paper_account_branches.auto_run` 打开。
+- `paper_account_branches.role` 只存 `live` / `control` 两个治理角色：主干与转正分支是 `live`，其余分支是 `control`；展示状态由 role + `auto_run` 派生 —— `live`、`control`（未参赛）、`shadow`（control 且 `auto_run=1`，正在影子运行）、`retired`（control 且 `auto_run=0`，已停跑对照）。老库启动时自动补 `role` 列并回填一次（主干 `live`、fork `control`），之后的重启不会覆盖转正结果。
+- 主干账户没有 branch 行时，跑批回退到「按名称解析单个账户 + env/default 策略」，与改造前行为一致。
+- 有 branch 行但全部 `auto_run=0` 时**不会**回退：返回 `multi_no_accounts`，一笔委托都不下，避免“暂停后又悄悄跑起来”。
+- 回填 branch 行只在执行态（非 dry-run）发生；干跑只读不写，因此老库第一次干跑可能仍走上面那条主干回退路径，执行一次或手动回填后才进入多账户模式。
+- 单账户异常只让该账户本次失败并记入 `paper_account_runs`，不阻断其它账户。账户解析或计划阶段失败时该账户不会写入任何成交；若进程在执行中途被杀，已提交的成交会保留，`trade_uid` 幂等保证重跑不会重复。
+
 ## API
 
 `POST /api/v1/paper-trading/run`（需要管理员登录会话，`ADMIN_AUTH_ENABLED=true` 时）
@@ -151,6 +249,51 @@
 
 `account_id` 与 `account_name` 都不传时，按名称 `纸面交易` 解析账户；不存在则在执行模式下自动创建，并以 `initial_cash`（默认 100000）记一笔「纸面交易初始资金」的现金流入。
 
+多账户模式：把 `"all_accounts": true` 加进请求体即可。
+
+```json
+{
+  "all_accounts": true,
+  "dry_run": true
+}
+```
+
+- 信号批次只构建一次，随后按 `account_id` 升序给每个 `auto_run=true` 的分支账户各成一次账；策略参数来自各账户自己的策略档。
+- `all_accounts=true` 与单账户策略参数互斥（`account_id`、`account_name`、`horizons`、`min_score`、`max_names`、`max_weight`、`signal_date`、`initial_cash`），混用返回 `400 validation_error`，不会静默忽略。
+- `force=true` 不是策略参数而是安全开关，可与 `all_accounts=true` 同用并对**每个账户**生效：只解除「同一成交日已有流水」的前置拒绝，`trade_uid` 幂等仍会跳过已成交委托。
+- 响应保留原有字段，新增 `batch_key` 与 `accounts` 列表（每行含 `account_id`、`account_name`、`label`、`status`、`orders`、`profile_id/name/version`、`auto_run`、`warnings`）；计划态的 `items` / `orders` / `portfolio` / `account` 在多账户模式下为空，因为每个账户各有一份。`batch.signal_dates` 只列**本次到期桶**的信号创建日，未来成交日的信号和已过期补跑批次不在这里冒充本次窗口。
+- 顶层 `status` 为 `multi_planned`（干跑）或 `multi_executed`（执行）。单个账户失败只体现为该行 `status=account_failed`，不影响其它账户。
+- 干跑不写 `paper_account_runs`。执行态在写入任何成交**之前**先落一行 `status=running` 审计，成交结束再原地改成终态：进程若在成交提交与终态回填之间被杀，库里会留下 `running` 行作为「这次尝试已开始、成交可能已落库」的证据；执行阶段抛错时同一行改为 `account_failed` 并写入 `error`，不追加第二行。
+
+### 运行审计
+
+`GET /api/v1/paper-trading/runs?account_id=2&limit=20`（只读）返回该账户最近的执行审计：`batch_key`、`status`、`error`、实际计入的 `signal_ids`/`due_signal_ids`、`horizons`、出场位、生效的策略档快照与成交笔数，按写入顺序倒序。干跑不写审计，所以这里只会出现真正执行过的批次；执行中途被杀的尝试会留下 `status=running` 的行，据此可以判断成交是否可能已经落库，再用 `trade_uid` 幂等重跑收口。
+
+### 跨账户对比与转正门槛
+
+`GET /api/v1/paper-trading/branches/comparison?as_of=2026-11-14&lookback_days=180&cost_method=fifo`（只读）
+
+- 每个分支账户的日度权益先按外部现金流水（入金/出金）还原为时间加权净值（TWR），再取「所有分支 fork_date 的最大值 → as_of」的共同交易日窗口，首日归一为 100，因此克隆账户次日注资不会被算成收益。
+- 与 `role=live` 的参照账户同窗口对比：区间收益、最大回撤、超额、最近 20 日滚动胜率、跟踪偏离、连续榜首天数。
+- 7 条转正门槛沿用影子框架默认阈值：可比 ≥ 20 日、成交 ≥ 8 笔、超额 ≥ 5%、回撤比 ≤ 1.2（live 回撤≈0 时改为分支回撤 ≤ 10%）、滚动胜率 ≥ 60%、连续榜首 ≥ 3 天；第 7 条「参数稳健性」在 DSA 分支上不适用（分支差异在出场纪律，没有可扰动的策略参数），返回 `status="na"` 且不参与 `passed` 判定。`score` 仍按影子框架权重计算，`na` 门槛按 0 分计，便于候选分支之间排序。
+- `account_ids=2,3` 可只对比指定账户；live 参照仍会加载用于计算超额。找不到 live 时只返回各分支自身曲线，不算超额与门槛。
+- 接口**只读**：不会为了补数据而写 `portfolio_daily_snapshots` 或审计行；净值来自已经存在的日度快照，因此依赖日常风控/纸面运行持续回填。若某账户没有历史快照，会在 `warnings` 中提示且该行 `series` 为空。
+
+### 转正与降级
+
+```bash
+# 只读预演：打印目标分支的对比指标与 7 条门槛，不修改任何数据
+python scripts/paper_branch_promote.py --account-id 3
+
+# 真正写库：单事务完成 目标 -> live、其余 live -> control
+python scripts/paper_branch_promote.py --account-id 3 --apply
+```
+
+- 转正只改治理角色，**不改 `auto_run`**：被降级的分支继续按原开关跑批，作为后续验证的对照组。
+- 同一事务内完成降级、转正与自检（提交前必须恰好一个 `live`），任何异常整体回滚。
+- 幂等：重复对同一分支 `--apply` 不会重复降级；对另一个分支再次 `--apply` 会把上一个 `live` 降为 `control`。
+- 门槛未通过仍可执行（由操作者决策），脚本会先打印「未通过」提示；`auto_run=false` 的分支转正后不会自动参赛，脚本同样会提示。
+
 ### 响应状态
 
 | status | 含义 |
@@ -162,6 +305,9 @@
 | `no_due_batch` | 最新数据日没有到期批次（可能只有已过期的漏跑批次） |
 | `data_not_ready` | 批次成交日的行情还没到（只处理未来批次，或指定批次尚未到期） |
 | `duplicate_batch` | 该成交日已有流水，需 `force=true` 才继续 |
+| `multi_planned` | 多账户干跑完成，逐账户结果在 `accounts` |
+| `multi_executed` | 多账户执行完成，`accounts[].status` 给出每个账户的终态 |
+| `multi_no_accounts` | 有分支记录但 `auto_run` 全为 0，本次不跑任何账户 |
 
 ### 幂等
 
@@ -184,7 +330,13 @@ python scripts/paper_trading_run.py --account-id 2 --min-score 65 --max-names 5 
 
 # 原始 JSON
 python scripts/paper_trading_run.py --json
+
+# 多账户：每个 auto_run 分支账户按自己的策略档跑，信号只取一次
+python scripts/paper_trading_run.py --all-accounts
+python scripts/paper_trading_run.py --all-accounts --apply
 ```
+
+`--all-accounts` 与单账户策略参数（`--account-id`、`--account-name`、`--horizons`、`--min-score`、`--max-names`、`--max-weight`、`--signal-date`、`--initial-cash`）互斥，混用直接报错退出；策略参数一律来自各账户的策略档。`--force` 不受此限，加了就对每个账户解除同日流水拒绝（`--all-accounts --apply --force`）。
 
 退出码：`0` 成功或无操作，`2` 行情未到（`data_not_ready`），`3` 同日已有流水（`duplicate_batch`），`1` 有委托失败。
 

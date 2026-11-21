@@ -1,0 +1,53 @@
+test_关闭后裸仓保持裸仓 (__main__.兜底止损.test_关闭后裸仓保持裸仓) ... ok
+test_已有止损不覆盖 (__main__.兜底止损.test_已有止损不覆盖) ... ok
+test_比例可配 (__main__.兜底止损.test_比例可配) ... ok
+test_裸仓补缺 (__main__.兜底止损.test_裸仓补缺) ... ok
+test_触线判定 (__main__.兜底止损.test_触线判定) ... ok
+test_all拦未知类型卖出 (__main__.冷却三态与边界.test_all拦未知类型卖出) ... ok
+test_all拦止盈后回补 (__main__.冷却三态与边界.test_all拦止盈后回补) ... ok
+test_stop_only不拦止盈后回补 (__main__.冷却三态与边界.test_stop_only不拦止盈后回补) ... ok
+test_stop_only拦止损后回补 (__main__.冷却三态与边界.test_stop_only拦止损后回补) ... ok
+test_出场当日回补拦截 (__main__.冷却三态与边界.test_出场当日回补拦截) ... ok
+test_天数可配 (__main__.冷却三态与边界.test_天数可配) ... ok
+test_第5个交易日仍拦 (__main__.冷却三态与边界.test_第5个交易日仍拦) ... ok
+test_第6个交易日放行 (__main__.冷却三态与边界.test_第6个交易日放行) ... ok
+test_跨标的互不影响 (__main__.冷却三态与边界.test_跨标的互不影响) ... ok
+test_默认off不拦 (__main__.冷却三态与边界.test_默认off不拦) ... ok
+test_600519坏止损_宽度99pct剔除 (__main__.坏价剔除.test_600519坏止损_宽度99pct剔除) ... ok
+test_坏目标3元类_倒挂剔除不拦截 (__main__.坏价剔除.test_坏目标3元类_倒挂剔除不拦截) ... ok
+test_坏目标5元类 (__main__.坏价剔除.test_坏目标5元类) ... ok
+test_宽度恰20pct不剔除 (__main__.坏价剔除.test_宽度恰20pct不剔除) ... ok
+test_宽度防护可配关闭 (__main__.坏价剔除.test_宽度防护可配关闭) ... ok
+test_止损不低于中价剔除 (__main__.坏价剔除.test_止损不低于中价剔除) ... ok
+test_缺止损剔除_走P0兜底 (__main__.坏价剔除.test_缺止损剔除_走P0兜底) ... ok
+test_缺止盈剔除 (__main__.坏价剔除.test_缺止盈剔除) ... ok
+test_低于阈值拦截 (__main__.盈亏比_入场中价口径.test_低于阈值拦截) ... ok
+test_入场区间倒挂视为缺失 (__main__.盈亏比_入场中价口径.test_入场区间倒挂视为缺失) ... ok
+test_入场区间单侧缺失_RR为None不拦截 (__main__.盈亏比_入场中价口径.test_入场区间单侧缺失_RR为None不拦截) ... ok
+test_用入场中价不用参考收盘 (__main__.盈亏比_入场中价口径.test_用入场中价不用参考收盘) ... ok
+test_等于阈值放行 (__main__.盈亏比_入场中价口径.test_等于阈值放行) ... ok
+test_阈值可配 (__main__.盈亏比_入场中价口径.test_阈值可配) ... ok
+test_出场类型推断 (__main__.费用与整手.test_出场类型推断) ... ok
+test_卖出印花税 (__main__.费用与整手.test_卖出印花税) ... ok
+test_整手规则 (__main__.费用与整手.test_整手规则) ... ok
+test_最低佣金 (__main__.费用与整手.test_最低佣金) ... ok
+test_cooldown_enabled_false强制关 (__main__.配置解析.test_cooldown_enabled_false强制关) ... ok
+test_全关后一切放行 (__main__.配置解析.test_全关后一切放行) ... ok
+test_冷却必须显式开启 (__main__.配置解析.test_冷却必须显式开启) ... ok
+test_数值置零关闭 (__main__.配置解析.test_数值置零关闭) ... ok
+test_旧键别名兼容 (__main__.配置解析.test_旧键别名兼容) ... ok
+test_显式开关优先 (__main__.配置解析.test_显式开关优先) ... ok
+test_空策略档与未知键 (__main__.配置解析.test_空策略档与未知键) ... ok
+test_策略档新键映射 (__main__.配置解析.test_策略档新键映射) ... ok
+test_非法scope回退off (__main__.配置解析.test_非法scope回退off) ... ok
+test_默认值即裁决口径 (__main__.配置解析.test_默认值即裁决口径) ... ok
+test_买不起一手拦截 (__main__.预算与最小金额.test_买不起一手拦截) ... ok
+test_只缩量不放大 (__main__.预算与最小金额.test_只缩量不放大) ... ok
+test_常备现金约束 (__main__.预算与最小金额.test_常备现金约束) ... ok
+test_最小金额边界 (__main__.预算与最小金额.test_最小金额边界) ... ok
+test_预算取两者较小 (__main__.预算与最小金额.test_预算取两者较小) ... ok
+
+----------------------------------------------------------------------
+Ran 48 tests in 0.002s
+
+OK

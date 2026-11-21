@@ -1,6 +1,7 @@
 import apiClient from './index';
 import { toCamelCase } from './utils';
 import type { PaperTradingRunRequest, PaperTradingRunResponse } from '../types/paperTrading';
+import type { BranchComparisonResponse } from '../types/paperBranchCompare';
 
 function toSnakeRunPayload(payload: PaperTradingRunRequest): Record<string, unknown> {
   return {
@@ -24,5 +25,24 @@ export const paperTradingApi = {
       toSnakeRunPayload(payload),
     );
     return toCamelCase<PaperTradingRunResponse>(response.data);
+  },
+
+  // 只读：跨账户分支净值与转正门槛对比（不写任何快照/审计）
+  async comparison(params?: {
+    asOf?: string;
+    lookbackDays?: number;
+    accountIds?: string;
+  }): Promise<BranchComparisonResponse> {
+    const response = await apiClient.get<Record<string, unknown>>(
+      '/api/v1/paper-trading/branches/comparison',
+      {
+        params: {
+          as_of: params?.asOf,
+          lookback_days: params?.lookbackDays,
+          account_ids: params?.accountIds,
+        },
+      },
+    );
+    return toCamelCase<BranchComparisonResponse>(response.data);
   },
 };

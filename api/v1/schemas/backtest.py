@@ -111,3 +111,14 @@ class PerformanceMetrics(BaseModel):
 
     advice_breakdown: Dict[str, Any] = Field(default_factory=dict)
     diagnostics: Dict[str, Any] = Field(default_factory=dict)
+
+    # 口径分离（2026-11-19，追加不删旧）：交易胜率仅 long+completed；
+    # cash 三分类复用引擎 flat 中性带。旧持久化 rollup 超行数上限时可能为 None。
+    trade_completed_count: Optional[int] = None
+    trade_win_count: Optional[int] = None
+    trade_win_rate_pct: Optional[float] = None
+    trade_avg_simulated_return_pct: Optional[float] = None
+    cash_missed_up_count: Optional[int] = None
+    cash_dodged_down_count: Optional[int] = None
+    cash_flat_correct_count: Optional[int] = None
+    neutral_band_pct: Optional[float] = None

@@ -132,9 +132,13 @@ export const portfolioApi = {
     return toCamelCase<PortfolioDeleteResponse>(response.data);
   },
 
-  async getSnapshot(query: SnapshotQuery = {}): Promise<PortfolioSnapshotResponse> {
+  async getSnapshot(
+    query: SnapshotQuery = {},
+    requestConfig: { timeout?: number } = {},
+  ): Promise<PortfolioSnapshotResponse> {
     const response = await apiClient.get<Record<string, unknown>>('/api/v1/portfolio/snapshot', {
       params: buildSnapshotParams(query),
+      ...requestConfig,
     });
     return toCamelCase<PortfolioSnapshotResponse>(response.data);
   },

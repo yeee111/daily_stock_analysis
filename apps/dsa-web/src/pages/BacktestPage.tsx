@@ -11,6 +11,7 @@ import {
   BACKTEST_DIRECTION_EXPECTED_LABELS,
   BACKTEST_MOVEMENT_LABELS,
   BACKTEST_OUTCOME_LABELS,
+  BACKTEST_CASH_LABELS,
   BACKTEST_PHASE_FILTER_OPTIONS,
   BACKTEST_PHASE_LABELS,
   BACKTEST_STATUS_LABELS,
@@ -87,6 +88,16 @@ function outcomeBadge(outcome: string | undefined, language: UiLanguage) {
     default:
       return <Badge variant="default">{outcome}</Badge>;
   }
+}
+
+// 口径分离：cash（观望）行的 outcome 是方向评判（flat 口径），不是交易盈亏。
+// 明细按机会成本标签展示，阈值与引擎 flat 判定一致（|r|<=band 横盘正确）。
+function cashOutcomeBadge(stockReturnPct: number, neutralBandPct: number, language: UiLanguage) {
+  const labels = BACKTEST_CASH_LABELS[language];
+  const band = Math.abs(neutralBandPct);
+  if (stockReturnPct > band) return <Badge variant="warning">{labels.missedUp}</Badge>;
+  if (stockReturnPct < -band) return <Badge variant="success">{labels.dodgedDown}</Badge>;
+  return <Badge variant="default">{labels.flatCorrect}</Badge>;
 }
 
 function statusBadge(status: string, language: UiLanguage) {
@@ -184,32 +195,47 @@ function phaseBreakdownText(metrics: PerformanceMetrics, language: UiLanguage): 
 const PerformanceCard: React.FC<{ metrics: PerformanceMetrics; title: string; language: UiLanguage }> = ({ metrics, title, language }) => {
   const text = BACKTEST_TEXT[language];
   const phaseText = phaseBreakdownText(metrics, language);
+  const band = metrics.neutralBandPct ?? 2;
   return (
     <Card variant="gradient" padding="md" className="animate-fade-in">
       <div className="mb-3">
         <span className="label-uppercase">{title}</span>
       </div>
-      <MetricRow label={text.directionAccuracy} value={pct(metrics.directionAccuracyPct)} accent />
-      <MetricRow label={text.winRate} value={pct(metrics.winRatePct)} accent />
-      <MetricRow label={text.avgSimulatedReturn} value={pct(metrics.avgSimulatedReturnPct)} />
-      <MetricRow label={text.avgStockReturn} value={pct(metrics.avgStockReturnPct)} />
+      <p className="mb-3 text-xs text-muted-text">{text.caliberNote}</p>
+
+      <div className="mb-1 text-xs font-semibold text-secondary-text">{text.tradeSection}</div>
+      <MetricRow label={text.tradeWinRate} value={pct(metrics.tradeWinRatePct)} accent />
+      <MetricRow label={text.tradeAvgSimulatedReturn} value={pct(metrics.tradeAvgSimulatedReturnPct)} />
       <MetricRow label={text.stopLossTriggerRate} value={pct(metrics.stopLossTriggerRate)} />
       <MetricRow label={text.takeProfitTriggerRate} value={pct(metrics.takeProfitTriggerRate)} />
       <MetricRow label={text.avgDaysToFirstHit} value={metrics.avgDaysToFirstHit != null ? metrics.avgDaysToFirstHit.toFixed(1) : '--'} />
       <div className="backtest-metric-footer">
-        <span className="text-xs text-muted-text">{text.evaluationCount}</span>
+        <span className="text-xs text-muted-text">{text.tradeSample}</span>
         <span className="text-xs text-secondary-text font-mono">
-          {Number(metrics.completedCount)} / {Number(metrics.totalEvaluations)}
+          {metrics.tradeWinCount ?? '--'} / {metrics.tradeCompletedCount ?? '--'}
         </span>
       </div>
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-muted-text">{text.outcomeSummary}</span>
+
+      <div className="mb-1 mt-4 text-xs font-semibold text-secondary-text">{text.directionSection}</div>
+      <MetricRow label={text.directionAccuracy} value={pct(metrics.directionAccuracyPct)} accent />
+      <MetricRow label={text.avgStockReturn} value={pct(metrics.avgStockReturnPct)} />
+      <MetricRow label={text.cashMissedUp} value={String(metrics.cashMissedUpCount ?? '--')} />
+      <MetricRow label={text.cashDodgedDown} value={String(metrics.cashDodgedDownCount ?? '--')} />
+      <MetricRow label={text.cashFlatCorrect} value={String(metrics.cashFlatCorrectCount ?? '--')} />
+      <div className="backtest-metric-footer">
+        <span className="text-xs text-muted-text">{formatUiText(text.neutralBand, { band: String(band) })}</span>
         <span className="text-xs font-mono">
           <span className="text-success">{metrics.winCount}</span>
           {' / '}
           <span className="text-danger">{metrics.lossCount}</span>
           {' / '}
           <span className="text-warning">{metrics.neutralCount}</span>
+        </span>
+      </div>
+      <div className="backtest-metric-footer">
+        <span className="text-xs text-muted-text">{text.evaluationCount}</span>
+        <span className="text-xs text-secondary-text font-mono">
+          {Number(metrics.completedCount)} / {Number(metrics.totalEvaluations)}
         </span>
       </div>
       {phaseText ? (
@@ -696,7 +722,11 @@ const BacktestPage: React.FC = () => {
                               </span>
                             </span>
                           </td>
-                          <td className="backtest-table-cell">{outcomeBadge(row.outcome, language)}</td>
+                          <td className="backtest-table-cell">
+                            {row.positionRecommendation === 'cash' && row.evalStatus === 'completed' && row.stockReturnPct != null
+                              ? cashOutcomeBadge(row.stockReturnPct, overallPerf?.neutralBandPct ?? 2, language)
+                              : outcomeBadge(row.outcome, language)}
+                          </td>
                           <td className="backtest-table-cell">{statusBadge(row.evalStatus, language)}</td>
                         </tr>
                       );

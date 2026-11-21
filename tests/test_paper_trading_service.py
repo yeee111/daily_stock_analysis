@@ -221,12 +221,13 @@ def _signal(
     }
 
 
-def _trade(trade_id, code, *, side="buy", day=date(2026, 10, 28), signal_id=7):
+def _trade(trade_id, code, *, side="buy", day=date(2026, 10, 28), signal_id=7, price=10.0):
     return SimpleNamespace(
         id=trade_id,
         trade_date=day,
         symbol=code,
         side=side,
+        price=price,
         note=f"paper trading: signal #{signal_id}",
         trade_uid=f"paper-{day.isoformat()}-{code}-{side}",
     )
@@ -652,6 +653,106 @@ def test_prefetch_warns_and_keeps_going_when_provider_returns_nothing():
     assert result["status"] == pt.STATUS_NOTHING_TO_DO
     assert repo.saved == []
     assert any("600519" in warning and "取数失败" in warning for warning in result["warnings"])
+
+
+# ----------------------------------------------------------------------
+# 干跑 trade_uid 去重标注（克隆继承委托显示修复；执行阶段幂等保持不动）
+# ----------------------------------------------------------------------
+def test_dry_run_marks_inherited_clone_orders_duplicate():
+    """克隆账户继承的旧委托：trade_uid 已存在 → 干跑标 duplicate，汇总笔数排除。"""
+    portfolio = _FakePortfolio(accounts=[_account(account_id=3)])
+    # 克隆继承的成交：与本批将生成的委托同 uid（成交日 2026-10-30）
+    portfolio.repo.trades.append(_trade(1, "600519", day=date(2026, 10, 30)))
+    signals = _FakeSignals([_signal(1, "600519", "buy", score=80, created="2026-10-29T15:00:00")])
+    bars = {
+        ("600519", date(2026, 10, 29)): _bar(0, 10.0),
+        ("600519", date(2026, 10, 30)): _bar(10.0, 10.1),
+    }
+    service = _Service(latest=date(2026, 10, 30), bars=bars, portfolio=portfolio, signals=signals)
+
+    result = service.run(account_id=3, dry_run=True)
+
+    assert result["status"] == pt.STATUS_PLANNED
+    orders = result["orders"]
+    assert len(orders) == 1
+    assert orders[0]["status"] == "duplicate"
+    assert orders[0]["trade_uid"] == "paper-2026-10-30-600519-buy"
+    assert "重复跳过" in orders[0]["reason"]
+    assert "本批 0 笔" in result["message"]
+    assert "1 笔委托 trade_uid 已存在" in result["message"]
+    assert portfolio.written == []  # 干跑不写任何成交
+
+
+def test_dry_run_new_batch_stays_planned():
+    """无继承流水的新批次：仍标 planned，汇总文案不受去重标注影响。"""
+    portfolio = _FakePortfolio(accounts=[_account(account_id=1)])
+    signals = _FakeSignals([_signal(1, "600519", "buy", score=80, created="2026-10-29T15:00:00")])
+    bars = {
+        ("600519", date(2026, 10, 29)): _bar(0, 10.0),
+        ("600519", date(2026, 10, 30)): _bar(10.0, 10.1),
+    }
+    service = _Service(latest=date(2026, 10, 30), bars=bars, portfolio=portfolio, signals=signals)
+
+    result = service.run(account_id=1, dry_run=True)
+
+    assert result["status"] == pt.STATUS_PLANNED
+    orders = result["orders"]
+    assert len(orders) == 1
+    assert orders[0]["status"] == "planned"
+    assert orders[0]["reason"] is None
+    assert "本批 1 笔" in result["message"]
+    assert "trade_uid 已存在" not in result["message"]
+
+
+def test_dry_run_mixed_batch_counts_only_new_orders():
+    """混合批次：继承委托标 duplicate，新委托标 planned，汇总 N 只数新委托。"""
+    portfolio = _FakePortfolio(accounts=[_account(account_id=3)])
+    portfolio.repo.trades.append(_trade(1, "600519", day=date(2026, 10, 30)))
+    signals = _FakeSignals([
+        _signal(1, "600519", "buy", score=80, created="2026-10-29T15:00:00"),
+        _signal(2, "000001", "buy", score=75, created="2026-10-29T15:00:00"),
+    ])
+    bars = {
+        ("600519", date(2026, 10, 29)): _bar(0, 10.0),
+        ("600519", date(2026, 10, 30)): _bar(10.0, 10.1),
+        ("000001", date(2026, 10, 29)): _bar(0, 10.0),
+        ("000001", date(2026, 10, 30)): _bar(10.0, 10.1),
+    }
+    service = _Service(latest=date(2026, 10, 30), bars=bars, portfolio=portfolio, signals=signals)
+
+    result = service.run(account_id=3, dry_run=True)
+
+    assert result["status"] == pt.STATUS_PLANNED
+    by_code = {order["stock_code"]: order for order in result["orders"]}
+    assert by_code["600519"]["status"] == "duplicate"
+    assert by_code["000001"]["status"] == "planned"
+    assert "本批 1 笔" in result["message"]
+    assert "另有 1 笔委托 trade_uid 已存在" in result["message"]
+
+
+def test_dry_run_zero_new_orders_notes_pending_next_day_signals():
+    """盘前干跑 0 笔新委托时，按真实 batch 状态追加"新信号待下一交易日跑批"事实说明。"""
+    portfolio = _FakePortfolio(accounts=[_account(account_id=3)])
+    portfolio.repo.trades.append(_trade(1, "600519", day=date(2026, 10, 30)))
+    signals = _FakeSignals([
+        # _due_ 批信号（信号日 10-29，成交日 10-30）：uid 已存在 → duplicate
+        _signal(1, "600519", "buy", score=80, created="2026-10-29T15:00:00"),
+        # 新信号（信号日 10-30 = 最新收盘日）：成交日 = 下一交易日 11-02，今晚尚不 due
+        _signal(2, "000001", "buy", score=80, created="2026-10-30T15:00:00"),
+    ])
+    bars = {
+        ("600519", date(2026, 10, 29)): _bar(0, 10.0),
+        ("600519", date(2026, 10, 30)): _bar(10.0, 10.1),
+    }
+    service = _Service(latest=date(2026, 10, 30), bars=bars, portfolio=portfolio, signals=signals)
+
+    result = service.run(account_id=3, dry_run=True)
+
+    assert result["status"] == pt.STATUS_PLANNED
+    assert "本批 0 笔" in result["message"]
+    assert "另有 1 条新信号（信号日 2026-10-30）" in result["message"]
+    assert "2026-11-02" in result["message"]  # 下一交易日，来自真实日历而非硬编码
+    assert portfolio.written == []
 
 
 def test_prefetch_is_off_by_default():
@@ -1269,3 +1370,116 @@ def test_run_result_health_absent_when_account_does_not_exist():
     assert result["status"] == pt.STATUS_NO_ACTIVE_SIGNALS
     assert "position_health" not in result
     assert service.portfolio.created == []
+
+
+# ----------------------------------------------------------------------
+# Profile exit discipline: stop_loss_pct / take_profit_pct override
+# ----------------------------------------------------------------------
+def test_effective_exit_levels_profile_pct_overrides_signal_levels():
+    stop, target, stop_source, target_source = pt._effective_exit_levels(
+        10.0,
+        {"stop_loss": 8.0, "target_price": 13.0},
+        {"stop_loss_pct": 0.05, "take_profit_pct": 0.2},
+    )
+
+    assert (stop, target) == (9.5, 12.0)
+    assert (stop_source, target_source) == ("profile", "profile")
+
+
+def test_effective_exit_levels_falls_back_per_side():
+    stop, target, stop_source, target_source = pt._effective_exit_levels(
+        10.0,
+        {"stop_loss": 8.0, "target_price": 13.0},
+        {"stop_loss_pct": 0.05},
+    )
+
+    assert (stop, target) == (9.5, 13.0)
+    assert (stop_source, target_source) == ("profile", "signal")
+
+
+def test_effective_exit_levels_uses_signal_when_buy_price_missing():
+    stop, target, stop_source, target_source = pt._effective_exit_levels(
+        None,
+        {"stop_loss": 8.0, "target_price": 13.0},
+        {"stop_loss_pct": 0.05, "take_profit_pct": 0.2},
+    )
+
+    assert (stop, target) == (8.0, 13.0)
+    assert (stop_source, target_source) == ("signal", "signal")
+
+
+def test_effective_exit_levels_ignores_out_of_range_pct_and_empty_signal():
+    assert pt._effective_exit_levels(10.0, {}, {"stop_loss_pct": 1.2, "take_profit_pct": 0}) == (
+        None,
+        None,
+        "",
+        "",
+    )
+
+
+def _pct_exit_run(*, exit_config, fill_bar):
+    """Holding bought at 10.0; today a fresh signal batch lands (signal day)."""
+    portfolio = _FakePortfolio(
+        accounts=[_account()],
+        cash=50_000.0,
+        equity=60_000.0,
+        positions=[_position("600519", 1000, price=10.0)],
+    )
+    portfolio.repo.trades.append(_trade(1, "600519", price=10.0, signal_id=9))
+    signals = _FakeSignals([_signal(9, "600519", "buy", created="2026-10-29T15:00:00", stop=8.0, target=13.0)])
+    bars = {
+        ("600519", date(2026, 10, 29)): _bar(0, 10.0),
+        ("600519", date(2026, 10, 30)): fill_bar,
+    }
+    service = _Service(latest=date(2026, 10, 30), bars=bars, portfolio=portfolio, signals=signals)
+    batch = service.build_signal_batch(market="cn", horizons_union=("3d",), signal_date=date(2026, 10, 29))
+    policy = pt.resolve_policy({"entry": {}, "exit": exit_config, "risk": {}})
+    return batch, service.run_for_account(batch, account_id=1, policy=policy, dry_run=True)
+
+
+def test_profile_stop_pct_fires_on_signal_day():
+    batch, result = _pct_exit_run(
+        exit_config={"stop_loss_pct": 0.05},
+        fill_bar=_bar(10.0, 9.4, high=10.0, low=9.4),
+    )
+
+    assert batch.signal_day is not None, "这条用例必须覆盖「信号日也要检查 resting 止损」"
+    orders = [(order["stock_code"], order["side"], order["quantity"], order["price"]) for order in result["orders"]]
+    assert orders == [("600519", "sell", 1000, 9.5)]
+    item = next(row for row in result["items"] if row["action"] == "stop_loss")
+    assert "持仓成本对应策略档" in item["reason"]
+
+
+def test_profile_stop_pct_does_not_fire_above_the_level():
+    _, result = _pct_exit_run(
+        exit_config={"stop_loss_pct": 0.05},
+        fill_bar=_bar(10.0, 9.6, high=10.1, low=9.6),
+    )
+
+    assert [order["side"] for order in result["orders"]] == []
+
+
+def test_empty_exit_config_keeps_signal_stop_behaviour():
+    _, result = _pct_exit_run(
+        exit_config={},
+        fill_bar=_bar(10.0, 7.9, high=10.0, low=7.9),
+    )
+
+    # 信号止损 8.0（不是 5% -> 9.5），说明空策略档仍走信号口径
+    orders = [(order["side"], order["quantity"], order["price"]) for order in result["orders"]]
+    assert orders == [("sell", 1000, 8.0)]
+    item = next(row for row in result["items"] if row["action"] == "stop_loss")
+    assert "持仓成本对应信号" in item["reason"]
+
+
+def test_exit_levels_profile_pct_survives_deleted_signal():
+    portfolio = _FakePortfolio(accounts=[_account()])
+    portfolio.repo.trades.append(_trade(1, "600519", price=10.0, signal_id=404))
+    service = _Service(latest=date(2026, 10, 30), bars={}, portfolio=portfolio, signals=_FakeSignals([]))
+
+    levels = service._exit_levels(portfolio.repo.trades, {"stop_loss_pct": 0.05})
+
+    assert levels["600519"]["stop"] == 9.5
+    assert levels["600519"]["target"] is None
+    assert levels["600519"]["source"] == {"stop": "profile", "target": ""}
+    assert levels["600519"]["signal"] == {"stock_code": "600519"}

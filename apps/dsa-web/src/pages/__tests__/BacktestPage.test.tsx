@@ -406,3 +406,52 @@ describe('BacktestPage', () => {
     expect(screen.getByText('1 日验证模式会用下一个交易日收盘表现校验 AI 预测。')).toBeInTheDocument();
   });
 });
+
+describe('BacktestPage 口径分离（2026-11-19）', () => {
+  it('渲染交易/意见两分区与口径说明，cash 行显示机会成本标签而非亏损', async () => {
+    window.localStorage.setItem(UI_LANGUAGE_STORAGE_KEY, 'zh');
+    mockGetOverallPerformance.mockResolvedValue({
+      ...basePerformance,
+      tradeCompletedCount: 2,
+      tradeWinCount: 1,
+      tradeWinRatePct: 50,
+      tradeAvgSimulatedReturnPct: 0.5,
+      cashMissedUpCount: 1,
+      cashDodgedDownCount: 1,
+      cashFlatCorrectCount: 1,
+      neutralBandPct: 2,
+    });
+    mockGetResults.mockResolvedValue({
+      total: 3,
+      page: 1,
+      limit: 20,
+      items: [
+        { ...baseResultItem, analysisHistoryId: 1, code: '600519', positionRecommendation: 'long', outcome: 'win', stockReturnPct: 3 },
+        { ...baseResultItem, analysisHistoryId: 2, code: '000001', positionRecommendation: 'cash', outcome: 'loss', stockReturnPct: 5 },
+        { ...baseResultItem, analysisHistoryId: 3, code: '600000', positionRecommendation: 'cash', outcome: 'win', stockReturnPct: 0.5 },
+      ],
+    });
+    render(
+      <UiLanguageProvider>
+        <BacktestPage />
+      </UiLanguageProvider>,
+    );
+
+    expect(await screen.findByText('模拟交易（仅买入/持有建议）')).toBeInTheDocument();
+    expect(screen.getByText('意见方向成绩单（含观望机会成本）')).toBeInTheDocument();
+    expect(screen.getByText('观望不计入交易胜率；错过上涨是机会成本，不是实亏。')).toBeInTheDocument();
+    expect(screen.getByText('交易胜率')).toBeInTheDocument();
+    // 三分类标签在汇总卡与明细表各出现一次（cash 行）
+    expect(screen.getAllByText('错过上涨').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('躲对下跌')).toBeInTheDocument();
+    expect(screen.getAllByText('横盘正确').length).toBeGreaterThanOrEqual(2);
+
+    const missedRow = screen.getByText('000001').closest('tr') as HTMLElement;
+    expect(within(missedRow).getByText('错过上涨')).toBeInTheDocument();
+    expect(within(missedRow).queryByText('亏损')).toBeNull();
+    const flatRow = screen.getByText('600000').closest('tr') as HTMLElement;
+    expect(within(flatRow).getByText('横盘正确')).toBeInTheDocument();
+    const longRow = screen.getByText('600519').closest('tr') as HTMLElement;
+    expect(within(longRow).getByText('盈利')).toBeInTheDocument();
+  });
+});

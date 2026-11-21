@@ -723,6 +723,109 @@ class PortfolioFxRate(Base):
     )
 
 
+class PaperStrategyProfile(Base):
+    """Named paper-trading policy profile (entry/exit/risk config, versioned).
+
+    ``config_json`` is written with ``json.dumps(..., ensure_ascii=False)`` and
+    read back through :attr:`config`. An all-empty profile means "fall back to
+    the current env/default behaviour"; real parameters must never be baked into
+    the shipped default profile.
+    """
+
+    __tablename__ = 'paper_strategy_profiles'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    config_json = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    __table_args__ = (
+        UniqueConstraint('name', 'version', name='uix_paper_profile_name_version'),
+    )
+
+    @property
+    def config(self) -> Dict[str, Any]:
+        """Parsed config, always carrying the ``entry``/``exit``/``risk`` sections."""
+        return parse_paper_policy_config(self.config_json)
+
+
+class PaperAccountBranch(Base):
+    """Branch metadata: which account forked from which parent, on which day.
+
+    One row per paper account (``account_id`` is also the FK/PK). The trunk
+    account has ``parent_account_id`` NULL. Rows are created by the clone script
+    or by the startup backfill in
+    :func:`src.repositories.portfolio_repo.ensure_paper_branch_defaults`.
+    """
+
+    __tablename__ = 'paper_account_branches'
+
+    account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), primary_key=True)
+    parent_account_id = Column(Integer, ForeignKey('portfolio_accounts.id'))
+    fork_date = Column(Date, nullable=False)
+    profile_id = Column(Integer, ForeignKey('paper_strategy_profiles.id'))
+    label = Column(String(64))
+    auto_run = Column(Boolean, nullable=False, default=False)
+    # Only ``live`` / ``control`` are stored; ``shadow`` (control + auto_run) and
+    # ``retired`` (control + not auto_run) are derived when reading.
+    role = Column(String(16), nullable=False, default='live')
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_paper_branch_parent_fork', 'parent_account_id', 'fork_date'),
+    )
+
+
+class PaperAccountRun(Base):
+    """Audit row: one batch run for one account (attribution + replay)."""
+
+    __tablename__ = 'paper_account_runs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(Integer, ForeignKey('portfolio_accounts.id'), nullable=False, index=True)
+    batch_key = Column(String(64), nullable=False)
+    profile_id = Column(Integer, ForeignKey('paper_strategy_profiles.id'))
+    status = Column(String(24), nullable=False)
+    decisions_json = Column(Text)
+    orders_json = Column(Text)
+    error = Column(Text)
+    created_at = Column(DateTime, default=datetime.now, index=True)
+
+    __table_args__ = (
+        Index('ix_paper_run_account_batch', 'account_id', 'batch_key'),
+    )
+
+
+def empty_paper_policy_config() -> Dict[str, Any]:
+    """The schema every profile section falls back to: all-empty = env defaults."""
+    return {"entry": {}, "exit": {}, "risk": {}}
+
+
+def parse_paper_policy_config(config_json: Optional[str]) -> Dict[str, Any]:
+    """Return ``{"entry": {}, "exit": {}, "risk": {}}`` from a stored profile.
+
+    Malformed or non-object payloads degrade to empty sections instead of
+    raising, so a bad row can never block the paper loop.
+    """
+    sections = empty_paper_policy_config()
+    if not config_json:
+        return sections
+    try:
+        payload = json.loads(config_json)
+    except (TypeError, ValueError):
+        return sections
+    if not isinstance(payload, dict):
+        return sections
+    for key in sections:
+        value = payload.get(key)
+        if isinstance(value, dict):
+            sections[key] = value
+    return sections
+
+
 class ConversationMessage(Base):
     """
     Agent 对话历史记录表
@@ -1454,6 +1557,7 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             Base.metadata.create_all(self._engine)
             self._ensure_llm_usage_telemetry_columns()
             self._ensure_decision_signal_profile_schema()
+            self._ensure_paper_branch_role_schema()
             self._ensure_stock_daily_canonical_id()
             self._ensure_intelligence_item_scope_values()
             self._ensure_schema_migration_record()
@@ -1780,6 +1884,54 @@ class DatabaseManager(metaclass=_DatabaseManagerMeta):
             stats["invalid_profile_count"],
             stats["skipped_existing_profile_count"],
         )
+
+    def _ensure_paper_branch_role_schema(self) -> None:
+        """Add + backfill ``paper_account_branches.role`` for existing DBs.
+
+        Only ``live`` / ``control`` are stored. When the column is created the
+        trunk (``parent_account_id IS NULL``) becomes ``live`` and every fork
+        becomes ``control``; later promotions are written by the promotion
+        transaction and must not be reset here, so the backfill runs only once.
+        """
+        if not self._is_sqlite_engine:
+            return
+        inspector = inspect(self._engine)
+        table = PaperAccountBranch.__tablename__
+        if not inspector.has_table(table):
+            return
+
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        added = False
+        if "role" not in existing:
+            try:
+                with self._engine.begin() as connection:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE {table} ADD COLUMN role VARCHAR(16) "
+                        "NOT NULL DEFAULT 'live'"
+                    )
+                added = True
+            except OperationalError as exc:
+                if not self._is_sqlite_duplicate_column_error(exc, "role"):
+                    raise
+                added = False
+            if added:
+                with self._engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            f"UPDATE {table} SET role = 'control' "
+                            "WHERE parent_account_id IS NOT NULL"
+                        )
+                    )
+
+        # Defensive: values outside the contract degrade to ``control``; the
+        # four display states are derived from role + auto_run when reading.
+        with self._engine.begin() as connection:
+            connection.execute(
+                text(
+                    f"UPDATE {table} SET role = 'control' "
+                    "WHERE role IS NULL OR role NOT IN ('live', 'control')"
+                )
+            )
 
     def _ensure_stock_daily_canonical_id(self) -> None:
         """Self-healing migration: add + backfill the ``canonical_id`` column.

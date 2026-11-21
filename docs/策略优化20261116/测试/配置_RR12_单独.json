@@ -1,0 +1,3 @@
+{"entry": {"min_rr": 1.2, "min_order_amount": 0},
+ "exit": {"fallback_stop_loss_pct": 0},
+ "risk": {"stop_cooldown_scope": "off", "budget_enabled": false}}

@@ -164,3 +164,133 @@ def test_run_response_carries_position_health(client: TestClient) -> None:
     assert health["held_names"] == 2
     assert health["no_stop_positions"][0]["code"] == "600760"
     assert health["stop_distances"][0]["distance_pct"] == -5.0
+
+
+def _comparison_payload() -> Dict[str, Any]:
+    return {
+        "as_of": "2026-11-14",
+        "cost_method": "fifo",
+        "lookback_days": 180,
+        "thresholds": {"min_days": 20.0, "min_trades": 8.0},
+        "window": {
+            "start": "2026-10-20",
+            "end": "2026-11-14",
+            "days": 18,
+            "reference_account_id": 1,
+        },
+        "branches": [
+            {
+                "account_id": 1,
+                "account_name": "live",
+                "role": "live",
+                "state": "live",
+                "is_reference": True,
+                "series": [],
+                "metrics": {"days": 18, "return_pct": 1.0, "trades": 0},
+                "gates": [],
+                "passed": None,
+                "score": None,
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def test_compare_branches_is_read_only_and_forwards_filters(client: TestClient) -> None:
+    with patch.object(module, "PaperBranchCompareService") as service_cls:
+        service_cls.return_value.compare.return_value = _comparison_payload()
+        response = client.get(
+            "/paper-trading/branches/comparison",
+            params={
+                "as_of": "2026-11-13",
+                "lookback_days": 60,
+                "cost_method": "avg",
+                "account_ids": "1, 2",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["window"]["reference_account_id"] == 1
+    kwargs = service_cls.return_value.compare.call_args.kwargs
+    assert kwargs["as_of"].isoformat() == "2026-11-13"
+    assert kwargs["lookback_days"] == 60
+    assert kwargs["cost_method"] == "avg"
+    assert kwargs["account_ids"] == [1, 2]
+
+
+def test_compare_branches_rejects_bad_account_ids(client: TestClient) -> None:
+    with patch.object(module, "PaperBranchCompareService") as service_cls:
+        response = client.get(
+            "/paper-trading/branches/comparison",
+            params={"account_ids": "1,abc"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "validation_error"
+    service_cls.assert_not_called()
+
+
+def test_compare_branches_rejects_empty_account_ids(client: TestClient) -> None:
+    response = client.get(
+        "/paper-trading/branches/comparison",
+        params={"account_ids": " , "},
+    )
+    assert response.status_code == 400
+
+
+def _multi_payload() -> Dict[str, Any]:
+    return {
+        "status": "multi_planned",
+        "dry_run": True,
+        "message": "多账户干跑：1 个账户",
+        "market": "cn",
+        "batch_key": "cn-2026-11-12-abc123",
+        "batch": {
+            "fill_date": "2026-11-12",
+            "reference_date": "2026-11-11",
+            "signal_dates": ["2026-11-11"],
+            "latest_data_date": "2026-11-12",
+        },
+        "accounts": [
+            {
+                "account_id": 1,
+                "account_name": "纸面交易",
+                "label": "纸面交易",
+                "status": "planned",
+                "message": "干跑",
+                "orders": 1,
+                "profile_id": 1,
+                "profile_name": "default",
+                "profile_version": 1,
+                "auto_run": True,
+                "warnings": [],
+            }
+        ],
+        "warnings": [],
+    }
+
+
+def test_all_accounts_forwards_force_without_conflict(client: TestClient) -> None:
+    with patch.object(module, "PaperTradingService") as service_cls:
+        service_cls.return_value.run_all_accounts.return_value = _multi_payload()
+        response = client.post("/paper-trading/run", json={"all_accounts": True, "force": True})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "multi_planned"
+    assert body["accounts"][0]["account_id"] == 1
+    assert body["batch"]["signal_dates"] == ["2026-11-11"]
+    kwargs = service_cls.return_value.run_all_accounts.call_args.kwargs
+    assert kwargs["force"] is True
+    assert kwargs["dry_run"] is True
+    service_cls.return_value.run.assert_not_called()
+
+
+def test_all_accounts_still_rejects_strategy_overrides(client: TestClient) -> None:
+    with patch.object(module, "PaperTradingService") as service_cls:
+        response = client.post("/paper-trading/run", json={"all_accounts": True, "min_score": 70})
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"] == "validation_error"
+    assert "min_score" in response.text
+    service_cls.return_value.run_all_accounts.assert_not_called()

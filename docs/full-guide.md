@@ -1053,6 +1053,8 @@ P5 在不修改 `PACK_VERSION = "1.0"`、不新增数据源和不改变报告 JS
 
 历史详情、同步分析响应和 completed 任务状态继续只通过 `report.details.analysis_context_pack_overview` 暴露低敏字段；P5 只在该 overview 下新增 `data_quality`，包含 score、level、block_scores 和 limitations，不重复公开 `warnings`。Web 报告页仍默认折叠展示数据块摘要，折叠头部新增质量分/等级，展开后展示限制说明和 `fetch_failed` 状态；`details.context_snapshot` 继续剥离顶层 `analysis_context_pack_overview`。
 
+Agent 模式下新闻由 Agent 运行期调用搜索工具获取，发生在输入包生成之后。为避免 overview 把已消费的新闻误报为 `missing`，pipeline 在 Agent 结束后按实际证据（`news_result_count > 0`）重建新闻块：状态 `available`、来源 `Agent 搜索`、metadata 记录条数，质量分随之重算；该回填只影响 overview、质量分与快照，不改动送入 LLM 的 Prompt 或分析结论。未搜到新闻（计数为 0）时不回填，仍按 `missing` 披露。
+
 #### AnalysisContextPack 文档、迁移与回滚（Issue #1389 P6）
 
 P6 只做文档与配置可见性收口，不新增 pack runtime、不新增 pack enable/disable feature flag、不修改 `PACK_VERSION = "1.0"`、不新增 API 参数、不改变报告 JSON schema，也不做数据库迁移。完整契约、字段状态、低敏摘要可见性、脱敏边界、迁移和回滚说明见 [AnalysisContextPack 专题文档](analysis-context-pack.md)。
@@ -1946,6 +1948,7 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 - 在事件列表中按账户、日期、方向、代码等条件筛选，并对单账户事件做删除修正。
 - 在纸面交易卡片下方查看业绩看板：总收益率（时间加权 TWR：按日链式收益，出入金计入当日收盘，不受入金时点影响）、总盈亏（= 总权益 − 净入金）、已实现/浮动盈亏、最大回撤、已平仓交易的胜率/盈亏比/平均持有天数，以及净值-回撤-基准折线。已平仓交易按 FIFO 用卖出配对最早剩余批次，一笔卖出产出一条配对记录；基准指数取 `PORTFOLIO_PERFORMANCE_BENCHMARK_SYMBOL`（默认 `000300`）的本地日线，本地缺该指数日线、或指数日线落后于本地个股最新日线时会自动回源补数（腾讯 `web.ifzq.gtimg.cn` 优先，东方财富 `push2his` 兜底），两路都失败才降级为文字提示，不影响其它指标。样本不足（已平仓 < 30 笔）会在“口径与提示”里明确标注。
 - 页面默认用本地收盘价估值，盘中当日日线尚未落地时持仓会标出“价格过期”。点业绩看板的“刷新行情”按钮会按实时价重算持仓并补齐基准，页面随后保持实时价刷新；该按钮只为本地完全缺价的持仓回补日线，不会逐只重拉已有日线的持仓。
+- 持仓明细卡片右上角的“刷新股价”按钮只做一件事：用 `include_realtime=true` 重新查询 `GET /api/v1/portfolio/snapshot` 并就地替换持仓表，按实时价刷新每只持仓的现价、市值与盈亏，价格来源标注为“实时价 · provider”，完成后显示“股价更新于 HH:MM:SS”。点击即拉取全部持仓的实时行情，通常需要数秒到十几秒，前端单独放宽到 60 秒超时；按钮在请求期间显示“刷新中...”并禁用。持仓表刷新成功后会通知业绩看板以 `include_realtime=true` 重新计算，业绩看板内的“当前持仓”卡片、KPI 与净值曲线同步切到实时价口径（该次重算在后台进行，稍晚于持仓表生效）；风险与暴露看板仍按收盘价口径（本页不请求实时风险）。该操作不补基准，也不做自动轮询，需要看新价时手动再点。
 - 业绩看板下方的「卖出复盘」对每笔已平仓交易做退出归因：按成交 uid 与信号回读判定退出原因（止盈触发/止损触发/信号清仓/信号减仓/手动），按原因统计盈亏贡献与胜率，回读建仓信号的评分与理由解释「为什么赚/为什么亏」，并用卖出后第 5/10/20 个交易日收盘相对卖价的走势检验卖点（落袋正确/卖飞/躲对下跌/卖在低点）。只读本地的成交流水、信号与日线，卖后日线不足时留空待数据积累。
 
 ### 相关接口
@@ -1996,6 +1999,15 @@ worker 会把 `triggered`、`skipped`、`degraded`、`failed` 写入 `alert_trig
 - 定时触发：`PAPER_TRADING_AUTO_RUN=true` 时有两处触发，共用同一幂等层——①定时分析结束后触发一次，无论分析成功、跳过、失败、超时、worker 丢失还是 watchdog 异常（分析因其他运行占用而跳过、或本次运行被新一代取代时不触发）；②按 `PAPER_TRADING_SCHEDULE_TIMES`（默认 `18:05,19:00`）独立定时执行，与分析的定时解耦，当天分析完全没跑也照常执行。触发来源（`analysis_hook:<outcome>` / `paper_trading_schedule` / `cli_hook:<outcome>`）会写进日志。
 - 成本模型（可选，默认关闭）：`PAPER_TRADING_SLIPPAGE_BPS` 对每笔成交做单边不利滑点（买入上浮、卖出下调，且不越过涨跌停价）；`PAPER_TRADING_MAX_ADV_PCT` 把单笔数量限制在 `PAPER_TRADING_ADV_WINDOW_DAYS`（默认 20）日均成交量的指定百分比内，超出按整手裁剪、裁到不足一手则跳过。两项都设为 `0` 时与旧口径完全一致。`scripts/paper_trading_cost_audit.py` 可对现有账本做反事实重定价，量化不同滑点下的胜率、盈亏比与总收益变化，并在临时库中运行、不改动真实数据。
 - 运行入口：Web 持仓页的纸面交易卡片（试跑 / 执行一次），接口 `POST /api/v1/paper-trading/run`；定时任务可用 `PAPER_TRADING_AUTO_RUN` / `PAPER_TRADING_AUTO_APPLY` 打开。
+
+### 多账户与账户分支（Phase 1）
+
+- 一个纸面账户一条独立账本；分支只描述它从哪个账户、哪一天分叉。所有账户共享同一批决策信号，每次跑批只构建一次信号批次（含补跑路径），账户数量不放大信号读取次数。
+- 克隆用 `scripts/paper_trading_clone.py`：默认 dry-run（只读备份真实库到临时文件，在副本里完成建账户 + 复制 + 校验），`--apply` 才写真实库。`fork_date` 归一为不大于它的最后一个交易日；复制 `portfolio_trades` / `portfolio_cash_ledger` / `portfolio_corporate_actions` 中不晚于 fork 日的事件，派生表由回放重算。
+- 克隆安全性：建账户、复制、写 branch 行在同一事务内；行级自检失败整体回滚；提交后按 fork 日比对两边快照（现金/权益/已实现盈亏/费用税费 `round(,6)`、持仓数量与成本 `round(,8)`），不一致则补偿删除；同名同 fork 幂等返回，同名异 fork 拒绝。
+- 策略档存在 `paper_strategy_profiles`（`config_json` 三段 `entry`/`exit`/`risk`），当前读取 `entry`（horizons/min_score/max_names/max_weight/initial_cash）、`exit`（`stop_loss_pct` / `take_profit_pct`，按最近买入价换算并覆盖信号价位，留空回退信号值）与 `risk`（retry_days/catchup_days/slippage_bps/max_adv_pct/adv_window_days）；优先级为「显式参数 > 策略档 > 环境变量 > 内置默认」，空档行为与单账户完全一致。
+- 自动跑批只选 `paper_account_branches.auto_run=true` 的账户，按账户 id 升序串行执行；克隆账户默认 `auto_run=false`，先观察再参赛。分支行存在但全部 `auto_run=0` 时返回 `multi_no_accounts` 且不下任何委托；分支行只在执行态回填，干跑只读不写。单账户异常只让该账户本次失败（账户解析/计划阶段失败不写入任何成交；进程中途被杀时已提交成交保留，`trade_uid` 保证重跑不重复）并写入 `paper_account_runs`，不阻断其它账户。
+- 多账户跑批：`POST /api/v1/paper-trading/run` 传 `"all_accounts": true`（与单账户参数互斥），或 `python scripts/paper_trading_run.py --all-accounts`；`GET /api/v1/paper-trading/runs?account_id=2` 只读查看每批次审计。干跑不写审计行。详细口径见 [纸面交易](paper-trading.md)。
 
 ### Agent 读取持仓
 

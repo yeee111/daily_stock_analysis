@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -108,6 +108,33 @@ class AnalysisContextBuilder:
             phase=artifacts.phase,
             blocks=blocks,
             data_quality=data_quality,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def with_agent_news_evidence(
+        artifacts: PipelineAnalysisArtifacts,
+        news_result_count: int,
+    ) -> PipelineAnalysisArtifacts:
+        """Reflect Agent-run news evidence discovered after the pack was built.
+
+        The Agent fetches news through its search tool *after* the pre-run input
+        pack is rendered, so the pre-run news block would be reported ``missing``
+        even though the model consumed those results. This refreshes only the
+        disclosure overview; the LLM input itself is left untouched.
+        """
+        try:
+            count = max(0, int(news_result_count))
+        except (TypeError, ValueError):
+            count = 0
+        if count == 0:
+            return artifacts
+        metadata = dict(artifacts.metadata or {})
+        metadata["news_source"] = "Agent 搜索"
+        return replace(
+            artifacts,
+            news_context=f"Agent 运行期通过搜索工具获取 {count} 条新闻资讯，已用于本次分析。",
+            news_result_count=count,
             metadata=metadata,
         )
 
@@ -424,6 +451,7 @@ def _build_news_block(artifacts: PipelineAnalysisArtifacts) -> AnalysisContextBl
     metadata: Dict[str, Any] = {}
     if artifacts.news_result_count is not None:
         metadata["news_result_count"] = artifacts.news_result_count
+    source = str((artifacts.metadata or {}).get("news_source") or "").strip() or None
 
     if not content:
         return AnalysisContextBlock(
@@ -443,8 +471,10 @@ def _build_news_block(artifacts: PipelineAnalysisArtifacts) -> AnalysisContextBl
             "content": AnalysisContextItem(
                 status=ContextFieldStatus.AVAILABLE,
                 value=content,
+                source=source,
             )
         },
+        source=source,
         metadata=metadata,
     )
 

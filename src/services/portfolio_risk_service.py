@@ -496,15 +496,23 @@ class PortfolioRiskService:
         cost_method: str = "fifo",
         lookback_days: int,
         include_realtime: bool = True,
+        persist: bool = True,
     ) -> Dict[str, Any]:
-        """Backfill the snapshot window and return daily equity points in CNY."""
-        self._ensure_drawdown_snapshot_window(
-            account_id=account_id,
-            as_of_date=as_of,
-            cost_method=cost_method,
-            lookback_days=lookback_days,
-            include_realtime=include_realtime,
-        )
+        """Return daily equity points in CNY.
+
+        ``persist=True`` backfills missing snapshots first (the historical
+        behaviour). Read-only callers such as the branch comparison endpoint
+        must pass ``persist=False`` so a GET never writes ``portfolio_daily_
+        snapshots``; they then only see snapshots that already exist.
+        """
+        if persist:
+            self._ensure_drawdown_snapshot_window(
+                account_id=account_id,
+                as_of_date=as_of,
+                cost_method=cost_method,
+                lookback_days=lookback_days,
+                include_realtime=include_realtime,
+            )
         rows = self.repo.list_daily_snapshots_for_risk(
             as_of=as_of,
             cost_method=cost_method,

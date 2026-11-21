@@ -15,7 +15,7 @@ from datetime import datetime
 from functools import partial
 from queue import Empty
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from src.config import Config, get_config
 from src.scheduler import Scheduler, normalize_schedule_times
@@ -31,6 +31,19 @@ DEFAULT_RUNTIME_SCHEDULER_TIMEOUT_SECONDS = 45 * 60
 PAPER_TRADING_SCHEDULE_TIMES_ENV = "PAPER_TRADING_SCHEDULE_TIMES"
 DEFAULT_PAPER_TRADING_SCHEDULE_TIMES: Tuple[str, ...] = ("18:05", "19:00")
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
+
+
+def _job_next_run_iso(jobs: Any) -> Optional[str]:
+    """Return the earliest ``next_run`` of one job group as ISO text."""
+    next_runs = [
+        job.next_run
+        for job in jobs or []
+        if getattr(job, "next_run", None) is not None
+    ]
+    if not next_runs:
+        return None
+    return min(next_runs).isoformat(timespec="seconds")
+
 
 # Single outcome vocabulary for one watchdog execution. The paper-trading pass
 # is triggered from the same collection point for every outcome that actually
@@ -93,6 +106,15 @@ def _run_scheduled_analysis_process(
     schedule_args_overrides: Dict[str, Any],
 ) -> None:
     """Run one analysis in a spawn-safe child process."""
+    # spawn 子进程不执行 main()，文件日志必须在此显式初始化（复用父进程同一入口），
+    # 否则分析进度/异常没有 handler，排障只能看到 lastResort 裸文本。
+    try:
+        from src.config import get_config
+        from src.logging_config import setup_logging
+
+        setup_logging(log_prefix="stock_analysis", log_dir=get_config().log_dir)
+    except Exception as exc:  # noqa: BLE001 - 日志初始化失败不得影响分析本身
+        logger.warning("Runtime analysis worker logging init failed: %s", exc)
     if os.name == "posix":
         try:
             os.setsid()
@@ -692,6 +714,10 @@ class RuntimeSchedulerService:
                     timeout,
                 )
                 _terminate_analysis_process_tree(process)
+                logger.error(
+                    "Runtime scheduled analysis worker terminated after timeout (exitcode=%s, result=None)",
+                    process.exitcode,
+                )
                 with self._analysis_process_lock:
                     if generation != self._analysis_generation:
                         return ANALYSIS_OUTCOME_GENERATION_ABORTED
@@ -710,6 +736,11 @@ class RuntimeSchedulerService:
             if result is None:
                 exit_code = process.exitcode
                 _terminate_analysis_process_tree(process)
+                logger.warning(
+                    "Runtime scheduled analysis worker lost: exited without a result "
+                    "(exitcode=%s, result=None)",
+                    exit_code,
+                )
                 with self._analysis_process_lock:
                     if generation != self._analysis_generation:
                         return ANALYSIS_OUTCOME_GENERATION_ABORTED
@@ -721,12 +752,17 @@ class RuntimeSchedulerService:
 
             process.join(2)
             if process.is_alive():
+                # 结果已到手：退出挂起（遗留非 daemon 线程被解释器 atexit 无限 join）
+                # 不再丢弃结果/误判 worker_lost，仅清理进程树并告警。
+                logger.warning(
+                    "Runtime scheduled analysis worker slow exit (exitcode=%s, success=%s, "
+                    "skipped=%s, error=%r); cleaning up process tree, result preserved",
+                    process.exitcode,
+                    result.get("success"),
+                    bool(result.get("skipped")),
+                    result.get("error"),
+                )
                 _terminate_analysis_process_tree(process)
-                with self._analysis_process_lock:
-                    if generation != self._analysis_generation:
-                        return ANALYSIS_OUTCOME_GENERATION_ABORTED
-                    self._last_error = "runtime scheduled analysis worker did not exit"
-                return ANALYSIS_OUTCOME_WORKER_LOST
 
             with self._analysis_process_lock:
                 if generation != self._analysis_generation:
@@ -972,6 +1008,46 @@ class RuntimeSchedulerService:
                 for entry in getattr(scheduler, "_background_tasks", [])
             )
 
+    def _jobs_snapshot(
+        self,
+        scheduler: Optional[Scheduler],
+        schedule_times: List[str],
+        running: bool,
+    ) -> List[Dict[str, Any]]:
+        """Describe every job currently registered on the live scheduler."""
+        jobs: List[Dict[str, Any]] = []
+        if scheduler is None:
+            return jobs
+        jobs.append({
+            "id": "analysis",
+            "kind": "daily",
+            "schedule_times": list(schedule_times),
+            "next_run_at": _job_next_run_iso(getattr(scheduler, "_daily_jobs", [])),
+            "running": bool(running),
+        })
+        for entry in getattr(scheduler, "_extra_daily_tasks", []):
+            jobs.append({
+                "id": str(entry.get("name") or "extra"),
+                "kind": "daily",
+                "schedule_times": list(entry.get("times") or []),
+                "next_run_at": _job_next_run_iso(entry.get("jobs")),
+            })
+        for entry in getattr(scheduler, "_background_tasks", []):
+            last_run = entry.get("last_run")
+            jobs.append({
+                "id": str(entry.get("name") or "background"),
+                "kind": "interval",
+                "interval_seconds": int(entry.get("interval_seconds") or 0),
+                "next_run_at": None,
+                "last_run_at": (
+                    datetime.fromtimestamp(float(last_run)).isoformat(timespec="seconds")
+                    if last_run
+                    else None
+                ),
+                "running": bool(entry.get("running")),
+            })
+        return jobs
+
     def status(self) -> Dict[str, Any]:
         scheduler = self._scheduler
         jobs = scheduler.schedule.get_jobs() if scheduler is not None else []
@@ -1006,4 +1082,5 @@ class RuntimeSchedulerService:
             "last_error": self._last_error,
             "last_skipped_at": self._last_skipped_at,
             "last_skip_reason": self._last_skip_reason,
+            "jobs": self._jobs_snapshot(scheduler, schedule_times, running),
         }

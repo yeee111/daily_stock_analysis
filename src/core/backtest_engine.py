@@ -364,6 +364,47 @@ class BacktestEngine:
         }
 
     @classmethod
+    def compute_trade_cash_metrics(
+        cls,
+        results: Iterable[BacktestResultLike],
+        *,
+        neutral_band_pct: float = 2.0,
+    ) -> Dict[str, Any]:
+        """口径分离（2026-11-19）：交易胜率仅统计 long+completed；cash 三分类复用 flat 中性带。
+
+        不改变任何逐行评判语义（direction_expected/outcome/first_hit/simulated_* 原样）。
+        cash 分类与 _classify_outcome 的 flat 分支同阈值：|r|<=band → 横盘正确；
+        r>band → 错过上涨（机会成本）；r<-band → 躲对下跌。stock_return_pct 缺失不计入。
+        """
+        completed = [r for r in results if (r.eval_status or "") == "completed"]
+        band = abs(float(neutral_band_pct))
+        trades = [r for r in completed if (r.position_recommendation or "") == "long"]
+        trade_win_count = sum(1 for r in trades if (r.outcome or "") == "win")
+        missed = dodged = flat = 0
+        for row in completed:
+            if (row.position_recommendation or "") != "cash":
+                continue
+            ret = cls._finite_optional_float(row.stock_return_pct)
+            if ret is None:
+                continue
+            if ret > band:
+                missed += 1
+            elif ret < -band:
+                dodged += 1
+            else:
+                flat += 1
+        return {
+            "trade_completed_count": len(trades),
+            "trade_win_count": trade_win_count,
+            "trade_win_rate_pct": round(trade_win_count / len(trades) * 100, 2) if trades else None,
+            "trade_avg_simulated_return_pct": cls._average([r.simulated_return_pct for r in trades]),
+            "cash_missed_up_count": missed,
+            "cash_dodged_down_count": dodged,
+            "cash_flat_correct_count": flat,
+            "neutral_band_pct": band,
+        }
+
+    @classmethod
     def compute_summary(
         cls,
         *,
@@ -372,6 +413,7 @@ class BacktestEngine:
         code: Optional[str],
         eval_window_days: int,
         engine_version: str,
+        neutral_band_pct: float = 2.0,
     ) -> Dict[str, Any]:
         """Aggregate BacktestResult rows into summary metrics."""
         results_list = list(results)
@@ -452,7 +494,7 @@ class BacktestEngine:
         advice_breakdown = cls._compute_advice_breakdown(completed)
         diagnostics = cls._compute_diagnostics(results_list)
 
-        return {
+        summary = {
             "scope": scope,
             "code": code,
             "eval_window_days": int(eval_window_days),
@@ -477,6 +519,9 @@ class BacktestEngine:
             "advice_breakdown": advice_breakdown,
             "diagnostics": diagnostics,
         }
+        # 追加口径分离字段（不删旧字段，API 兼容）
+        summary.update(cls.compute_trade_cash_metrics(results_list, neutral_band_pct=neutral_band_pct))
+        return summary
 
     @staticmethod
     def _normalize_text(value: Optional[str]) -> str:

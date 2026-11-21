@@ -36,6 +36,7 @@ _SIGNAL_NOTE_RE = re.compile(r"signal #(\d+)")
 EXIT_REASON_LABELS = {
     "take_profit": "止盈触发",
     "stop_loss": "止损触发",
+    "time_exit": "持有到期",
     "signal_sell": "信号清仓",
     "signal_reduce": "信号减仓",
     "level_exit": "止盈止损（信号缺失）",
@@ -357,6 +358,9 @@ class PortfolioPerformanceService:
         at or above the target, modulo slippage which only hurts the fill).
         """
         action = str((signal or {}).get("action") or "").strip().lower()
+        # 时间止盈（持有到期）是独立出口：uid 带 -time_exit，不能按价格贴到止盈/止损上
+        if uid.endswith("-time_exit"):
+            return "time_exit"
         if uid.endswith("-exit") or action in {"buy", "add"}:
             stop = cls._positive_level((signal or {}).get("stop_loss"))
             target = cls._positive_level((signal or {}).get("target_price"))

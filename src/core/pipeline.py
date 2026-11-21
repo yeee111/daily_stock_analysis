@@ -1571,21 +1571,22 @@ class StockAnalysisPipeline:
                 code, stock_name, analysis_target=analysis_target
             )
             market = "cn" if is_index else get_market_for_stock(normalize_stock_code(code))
+            agent_context_artifacts = self._build_agent_analysis_artifacts(
+                code=code,
+                stock_name=stock_name,
+                market=market,
+                phase=market_phase_context,
+                initial_context=initial_context,
+                fundamental_context=fundamental_context,
+                query_id=query_id,
+                base_context=analysis_context,
+                portfolio_context=portfolio_context,
+            )
             (
                 analysis_context_pack_summary,
                 analysis_context_pack_overview,
             ) = self._build_analysis_context_pack_outputs(
-                self._build_agent_analysis_artifacts(
-                    code=code,
-                    stock_name=stock_name,
-                    market=market,
-                    phase=market_phase_context,
-                    initial_context=initial_context,
-                    fundamental_context=fundamental_context,
-                    query_id=query_id,
-                    base_context=analysis_context,
-                    portfolio_context=portfolio_context,
-                ),
+                agent_context_artifacts,
                 report_language=report_language,
                 code=code,
                 query_id=query_id,
@@ -1797,6 +1798,20 @@ class StockAnalysisPipeline:
                 if isinstance(market_structure_context, dict):
                     result.market_structure_context = market_structure_context
                 result.market_phase_summary = market_phase_summary
+                # Agent 运行期才搜到的新闻不在上面预生成的输入包里，按实际证据
+                # 刷新展示层，避免把已被模型消费的新闻误报成缺失。
+                if isinstance(result.news_result_count, int) and result.news_result_count > 0:
+                    refreshed_artifacts = AnalysisContextBuilder.with_agent_news_evidence(
+                        agent_context_artifacts, result.news_result_count
+                    )
+                    _, refreshed_overview = self._build_analysis_context_pack_outputs(
+                        refreshed_artifacts,
+                        report_language=report_language,
+                        code=code,
+                        query_id=query_id,
+                    )
+                    if refreshed_overview:
+                        analysis_context_pack_overview = refreshed_overview
                 result.analysis_context_pack_overview = analysis_context_pack_overview
                 final_action = normalize_decision_action(getattr(result, "action", None))
                 if isinstance(result.dashboard, dict):

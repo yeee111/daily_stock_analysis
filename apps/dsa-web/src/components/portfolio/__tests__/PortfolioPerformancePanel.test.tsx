@@ -185,6 +185,31 @@ describe('PortfolioPerformancePanel', () => {
     expect(screen.getByText('成交按 T+1 开盘价撮合，未模拟排队/滑点，实盘结果会偏保守')).toBeTruthy();
   });
 
+  it('reloads with realtime prices when the positions refresh token changes', async () => {
+    const { rerender } = render(
+      <UiLanguageProvider>
+        <PortfolioPerformancePanel accountId={42} costMethod="fifo" includeRealtime={false} refreshToken={0} />
+      </UiLanguageProvider>,
+    );
+
+    await waitFor(() => expect(getPerformance).toHaveBeenCalledTimes(1));
+    expect(getPerformance).toHaveBeenLastCalledWith(expect.objectContaining({ includeRealtime: false }));
+
+    rerender(
+      <UiLanguageProvider>
+        <PortfolioPerformancePanel accountId={42} costMethod="fifo" includeRealtime={false} refreshToken={1} />
+      </UiLanguageProvider>,
+    );
+
+    await waitFor(() => expect(getPerformance).toHaveBeenCalledTimes(2));
+    expect(getPerformance).toHaveBeenLastCalledWith({
+      accountId: 42,
+      asOf: undefined,
+      costMethod: 'fifo',
+      includeRealtime: true,
+    });
+  });
+
   it('reloads when the refresh button is clicked', async () => {
     renderPanel();
 

@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] 桌面端本地构建默认关闭更新检查：`build.extraMetadata.dsaUpdateCheck=off` 时不请求 GitHub Releases、不弹更新提醒、隐藏更新入口，避免本地定制的托盘/运行状态能力被上游 Release 覆盖；`DSA_DESKTOP_UPDATE_CHECK=on` 或 `--no-update-check` 可覆盖默认值，文档见 `docs/desktop-package.md`「桌面端更新提醒」。
+- [新功能] Web UI 新增「运行状态」页（`/runtime`）：集中展示后端进程、后台服务（定时分析 / 告警事件监控 / 任务队列 / 纸面交易）、定时任务的下次执行与上次运行，并提供自动刷新与「立即执行」；新增 `GET /api/v1/runtime/overview` 聚合接口，`/api/v1/system/scheduler/status` 增加 `jobs` 明细，文档见 `docs/desktop-package.md`「系统托盘与运行状态」。
+- [新功能] 桌面端新增系统托盘与「关闭到托盘」：托盘菜单显示后端、下一次定时任务与任务队列状态并可直达运行状态页；启动时自动复用本机已在运行的 DSA 后端（`DSA_DESKTOP_ATTACH_EXISTING=0` 可关闭），避免同机重复启动第二个调度器。
+
+- [新功能] 纸面交易策略档新增 `exit.max_holding_days`（时间止盈，默认不启用）：持仓从建仓次日数满 N 个交易日后在开盘卖出，成交 `trade_uid` 带 `-time_exit`、`note` 追加 `[time_exit]`；成交顺序为 信号卖出 → 时间止盈 → 盘中止盈止损，停牌/跌停/流动性不足时保留持仓次日再判，交易日历不可用时不做并告警。用于修复「3d 信号持有 5.1 天、最长 18 天」的 horizon 漂移，配套文档见 `docs/paper-trading.md`「时间止盈（持有到期）」。
+
+- [改进] 回测口径分离（只改聚合与展示，逐行评判语义与历史数据不变）：汇总追加 `trade_completed_count/trade_win_count/trade_win_rate_pct/trade_avg_simulated_return_pct`（仅 long+completed）与 cash 三分类 `cash_missed_up_count/cash_dodged_down_count/cash_flat_correct_count`（复用引擎 flat 中性带阈值）及 `neutral_band_pct`，旧字段保留、API 兼容；持久化旧 rollup 读取时按相同身份约束从结果行补算。回测页拆为「模拟交易（仅买入/持有建议）」与「意见方向成绩单（含观望机会成本）」两分区，顶部口径说明"观望不计入交易胜率；错过上涨是机会成本不是实亏"，明细表 cash 行按机会成本标签（错过上涨/躲对下跌/横盘正确）展示而非亏损。
+
+- [修复] 定时分析 watchdog 先取结果再判退出：子进程已 put 结果时按 success/skipped/error 正常归类（恢复 SUCCESS 触发选股信号桥与 last_success_at），join(2) 超时仅清理进程树并记 WARNING（带 exitcode 与结果摘要），不再把"分析完成但退出挂起"误判为 worker_lost 丢弃结果；worker_lost 仅保留给无结果且进程消失的真丢失，timeout/worker_lost 日志补 exitcode。
+- [修复] 定时分析 spawn 子进程入口复用 setup_logging 接入与父进程一致的文件日志（此前子进程日志无 handler，分析进度/异常不可见）；初始化失败降级告警不影响分析。
+- [改进] 纸面干跑汇总在"本批 0 笔新委托"且存在信号日=最新收盘日、待下一交易日成交的活跃信号时，追加事实说明"另有 N 条新信号（信号日 YYYY-MM-DD）待今日收盘数据发布后于今晚跑批执行"（N/日期/措辞由 batch 真实状态计算），避免盘前干跑被误读为信号断供；CLI/API/UI 同一数据源生效。
+
+- [修复] 纸面交易干跑计划对 trade_uid 已存在于账户成交流水的委托（克隆账户继承的旧批次）标注 `duplicate` 与"重复跳过（克隆继承或已成交）"原因，不再误标 `planned`；"本批 N 笔委托将按开盘价成交"汇总只统计新委托并附注跳过笔数；执行阶段幂等去重逻辑不变（双保险）。
+- [修复] 持仓页"已平仓交易"与"卖出复盘·平仓明细"在全部账户切到单账户后残留重复行：表格 React key（代码+平仓日等）在克隆历史跨账户重复时碰撞，导致 keyed reconciliation 无法移除旧行；key 追加序号保证唯一（数据不去重，全部账户视图行为不变），业绩看板当前持仓表同修。
+
+- [新功能] 纸面交易接入独立风控闸门（新模块 `src/services/paper_risk_control.py`，纯函数零 I/O）：P0 裸仓兜底止损（仅补缺，新键 `exit.fallback_stop_loss_pct`）、入场中价口径盈亏比过滤（坏价剔除告警不拦截）、出场冷却（`off`/`stop_only`/`all`，默认 off，按成交 note 动作标记识别）、单笔现金预算（只缩量不放大）与最小单金额五项，全部由策略档新增键显式启用，空策略档零行为变化；策略档白名单同步扩展，出场成交 note 追加 `[stop_loss]`/`[take_profit]` 标记，止损体检与计划两条链路兜底口径一致；干跑对比与接入说明见 `docs/策略优化20261116/`。
+- [新功能] dsa-web 新增「分支对比」页（`/branch-compare`，导航位于持仓旁）：各纸面风控分支 TWR 净值曲线叠图（含 live 对照、分叉日竖线、底部图例、按类别分组的悬停卡片）、7 条转正门槛状态表与分支汇总卡；顶部常驻「30+ 笔平仓前不下结论」纪律提示；未 fork 时友好空态；只读页面，不触发任何写操作。
+
+- [修复] Agent 模式在运行期通过搜索工具取得的新闻未回填到「数据上下文」输入包，导致已参与分析的新闻被误报为缺失、质量分偏低；现于 Agent 结束后按实际证据（`news_result_count > 0`）重建新闻块并重算质量分，来源标记为「Agent 搜索」，未搜到新闻时仍按缺失披露；仅影响展示与快照，不改动 LLM 输入与结论。
+- [新功能] 纸面交易策略档 `exit` 段接入出场纪律：`stop_loss_pct` / `take_profit_pct` 按最近一次买入价换算固定止损/止盈比例（`0 < x < 1`），逐侧覆盖信号自带价位，留空或越界（只告警不抛错）时回退信号值；计划审计记录每侧的 `source`（`profile`/`signal`），卖出原因文案标明「持仓成本对应策略档/信号」，持仓止损体检同步按同一口径计算；空 `exit` 段行为与改造前一致。
+- [新功能] 纸面交易分支新增治理角色 `paper_account_branches.role`（只存 `live`/`control`）：`shadow`（control+auto_run）与 `retired`（control+未开启 auto_run）由 `auto_run` 派生，分支视图与跑批汇总新增 `role`/`state`；克隆脚本写入 `control`，主干回填写入 `live`，`upsert_branch` 不带 role 时不覆盖已转正角色；老库启动自动补列并只回填一次（主干 live、fork control），重启不会重置转正结果。
+- [测试] 新增 role 迁移（补列/回填/转正后重启保持 live）、克隆控制组角色、`upsert_branch` 不撤销转正与非法角色拒绝、四种派生状态共 3 例。
+- [新功能] 新增只读跨账户对比接口 `GET /api/v1/paper-trading/branches/comparison`：按现金流水还原各分支的时间加权净值（公共窗口首日归一 100，剔除次日注资），对比 live 参照计算区间收益、最大回撤、超额、20 日滚动胜率、跟踪偏离与连续榜首，并复用影子框架 7 条转正门槛（第 7 条参数稳健性在 DSA 分支上返回 `na` 且不参与判定）；接口不写快照与审计，净值取自已存在的日度快照。
+- [测试] 新增分支对比服务 4 例（TWR 剔除注资/公共窗口对齐、只读不写快照、全门槛通过且综合分 75、`account_ids` 过滤仍加载 live 参照）与 API 3 例（参数透传、非法/空账户 id 返回 400）。
+- [新功能] 新增纸面分支转正事务 `PortfolioRepository.promote_branch` 与 `scripts/paper_branch_promote.py`：单事务把目标分支置 `live`、其余 `live` 降为 `control`，`auto_run` 不变（降级分支继续跑对照），提交前自检恰好一个 `live`；脚本默认只读预演，`--apply` 才写库，重复执行幂等。
+- [测试] 新增转正事务 2 例（单事务换 live/连续转正/幂等/未知账户拒绝、非法 role 主干按 live 一并降级）。
+- [修复] 纸面交易常驻止盈止损此前在「有新信号批次的日子」被整批跳过（信号日的持仓不受止损/止盈保护）；现每个交易日都参与计划，只有当天已被信号卖单清掉的标的才跳过，详见 `docs/paper-trading.md`。
+- [测试] 纸面交易新增 8 例：策略档比例覆盖/逐侧回退/缺买入价回退/越界忽略、信号日常驻止损成交、未触及不成交、空档保持信号口径、策略档字段校验告警。
 - [修复] Agent 工具消息内容与工具调用参数序列化不再透传 NaN/±Infinity：`LLMToolAdapter._convert_messages` 序列化前将非有限浮点递归归一化为 `null`，并以 `allow_nan=False` 输出严格 RFC 8259 JSON，避免 LiteLLM 以 `"NaN" is not valid JSON` 拒绝请求（#2471）。
 
 - [修复] 启动日志不再对 `--stocks` / `--portfolio` / `--no-notify` 已覆盖的配置项告警；单一日线数据源失败（含 Eastmoney 股票与 ETF 请求）降为 WARNING，普通股票及 A 股指数全部日线数据源失败仍为 ERROR；LLM 返回与调试日志显示实际响应模型（含流式响应），依据实际调用路由标注回退，避免将别名、供应商前缀和日期版本差异误报为回退
@@ -42,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [测试] 新增 `tests/test_portfolio_performance_service.py`（13 例：FIFO 配对、盈亏比、部分卖出剩余批次、净入金与回撤、时间加权收益率、基准可用/缺失/自动补数、日线入库代码、补数入口只补缺价持仓、空账户、接口连通）与 `apps/dsa-web/src/components/portfolio/__tests__/PortfolioPerformancePanel.test.tsx`（7 例，含"刷新行情"切实时价与提示文案）。
 - [新功能] 纸面交易新增可交易板块约束（`PAPER_TRADING_ALLOWED_BOARDS`，默认 `main,gem`）：科创板（688）、北交所（4/8 开头）与港股（`HKxxxxx` / `xxxxx.HK`）的买入信号只在计划表标注“不在可交易板块，跳过”，不占持仓名额；卖出与止盈止损不受限，便于模拟真实账户权限。
 - [文档] `docs/full-guide.md`、`docs/full-guide_EN.md`、`.env.example` 与 `docs/architecture/api_spec.json` 同步业绩看板接口、指标口径与基准配置。
+- [新功能] 纸面交易支持多账户与账户分支（Phase 1）：所有账户共享同一批决策信号（每轮只构建一次批次，补跑路径同样不变），每个账户按自己的策略档 `paper_strategy_profiles` 执行；`PaperPolicy` 只消费既有执行器参数（entry 的 horizons/min_score/max_names/max_weight/initial_cash 与 risk 的 retry_days/catchup_days/slippage_bps/max_adv_pct/adv_window_days），exit 段留待后续阶段，空档行为与单账户完全一致；新增 `paper_trading_clone.py`（默认 dry-run，只写临时副本；`--apply` 单事务建账户并复制三张事件表，行级自检 + 提交后按 fork 日比对快照，失败补偿删除，同名异 fork 拒绝，同名同 fork 幂等）、`paper_account_runs` 逐账户审计、`POST /api/v1/paper-trading/run` 的 `all_accounts` 模式与只读 `GET /api/v1/paper-trading/runs`、CLI `--all-accounts`；自动跑批按 branch 的 `auto_run` 串行成账、全部关闭时返回 `multi_no_accounts` 且不下单，单账户异常不影响其它账户（账户解析/计划阶段失败不写入成交；进程中途被杀时已提交成交保留，`trade_uid` 保证重跑不重复），分支行只在执行态回填、干跑不写审计，详见 `docs/paper-trading.md`。
 - [改进] 业绩看板总收益率改为时间加权（TWR）：按日链式 `(当日权益 − 当日出入金) / 前日权益`，出入金统一按当日收盘计，入金时点不再扭曲收益率；净值曲线逐点给出 `return_pct`，曲线终点与头部指标同源，总盈亏仍为 `总权益 − 净入金`，口径写入"口径与提示"。
 - [新功能] 基准指数本地缺日线时自动回源补数（腾讯 `web.ifzq.gtimg.cn` 优先、东方财富 `push2his` 兜底，`PORTFOLIO_MARKET_DATA_SYNC_ENABLED` 默认开启），业绩看板由此拿到真实基准对比；新增 `POST /api/v1/portfolio/market-data/refresh` 与看板"刷新行情"按钮，按钮按实时价重算持仓并补齐基准，仅对本地完全缺价的持仓回补日线。
 - [改进] 指数日线以带市场前缀的代码入库（`sh000300`）并显式双写 `canonical_id`，读取时同时兼容裸码配置，避免裸码股票桶被指数收盘污染（`000001` 既是平安银行又是上证指数）；裸码入库会被 `_backfill_canonical_ids()` 在重启时改回股票身份，因此不能作为指数数据的存储键。
@@ -69,6 +98,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - [修复] 大盘 Market Light 评分和中英文指数均值排除 VIX 波动率涨跌幅，保留原始行情展示；仅有 VIX 时指数维度标为不可用，告警沿用跳过语义（#2472）。
 
 - [改进] Agent 轨迹评估增加独立股票范围诊断与干扰股票样例，区分越界请求、运行时拦截和无法判定调用，支持多股对比及阶段明细，不改变原指标或退出码。
+- [新功能] 持仓明细卡片新增「刷新股价」按钮：按 `include_realtime=true` 重新查询组合快照并就地更新每只持仓的实时现价、市值与盈亏，价格来源显示「实时价 · provider」，完成后在卡片右上角显示「股价更新于 HH:MM:SS」；请求单独放宽到 60 秒超时，期间按钮显示「刷新中...」并禁用，失败时在卡片内提示原因。持仓表更新后同步通知业绩看板以 `include_realtime=true` 重算，使「当前持仓」卡片、KPI 与净值曲线切到实时价口径；风险与暴露看板仍按收盘价口径，不补基准，也不自动轮询。
+
+- [修复] 纸面交易多账户模式（`all_accounts=true` / `--all-accounts`）此前把 `force` 当策略参数拒绝，导致同成交日重跑无法强制成账；现 `force` 不再与多账户互斥，并对每个账户同样生效（只解除同日流水拒绝，`trade_uid` 幂等仍跳过已成交委托）。
+- [修复] 纸面交易执行态改为「先开审计行、后写成交」：每账户在任何 `record_trade` 之前落一行 `status=running`，成交后原地改写为终态；进程在成交提交与终态回填之间被杀时留下 `running` 行作为尝试证据，执行阶段抛错时同一行改为 `account_failed` 并写 `error`，不再追加第二行重复计数。
+- [修复] `paper_trading_clone.py` 缺省 `default` 策略档改为与账户、事件行、branch 行同事务创建：解析阶段只返回「待创建」描述，克隆因行级自检失败整体回滚时不再残留孤立策略档。
+- [修复] 多账户运行结果的 `batch.signal_dates` 改为只列本次到期桶的信号创建日，未来成交日与已过期补跑批次的信号不再混入展示窗口；`list_branch_accounts` 的 `auto_run_only` / `include_inactive` 改为显式 SQL 条件，语义可读、不再依赖条件拼接顺序。
+- [测试] 新增 11 例回归：审计行 `running→executed` 原地收口与执行失败只留一行、多账户 `force` 解除同日拦截且 uid 仍幂等、批次展示只看到期桶、API `force` 透传与策略参数仍互斥、克隆待创建档随事务落库且失败无孤立档、`update_account_run` 原地改写与缺失行返回 `None`、分支清单两个过滤条件各自生效。
+- [文档] `docs/paper-trading.md` 同步多账户 `force` 口径、审计行先开后改、克隆策略档同事务与 fork 出场位「Phase 2 再落库」边界。
+- [新功能] 纸面风控新增两道默认关闭的止盈计划闸门：`risk.bad_target_enabled` 拦截缺止盈价或止盈价 ≤ 拟成交价（价格倒挂）的买入，`entry.min_target_space` / `risk.target_space_enabled` 按实际成交价（含滑点）拦截止盈空间不足（默认 1.5%）的追高单；拦截顺序为 出场冷却 > 坏目标 > 止盈空间 > 盈亏比 > 预算/最小单，空策略档仍零行为变化，策略档白名单同步扩展。
+- [测试] 新增 `tests/test_paper_risk_control.py` 5 例：坏目标缺失/倒挂拦截、止盈空间按成交价拦截与关闭、策略档数值/布尔触发键与白名单告警消除。
+- [文档] `docs/策略优化20261116/实现/接入说明.md` 追加 V6 分支口径（全冷却 3 日 + 坏目标 + 止盈空间 ≥1.5%）与 12 日干跑结论、生效需重启与回滚方式。
 
 ## [3.33.0] - 2026-10-15
 

@@ -710,7 +710,25 @@ class BacktestService:
         )
         if summary is None:
             return None
-        return self._summary_to_dict(summary)
+        payload = self._summary_to_dict(summary)
+        if "trade_completed_count" not in payload:
+            # 持久化汇总行没有口径分离字段（旧 rollup）：从底层结果行补算，
+            # 阈值与评判时同源（backtest_neutral_band_pct），不新造口径。
+            rows = self.repo.list_results(
+                code=code,
+                eval_window_days=payload.get("eval_window_days"),
+                engine_version=engine_version,
+                limit=self.MAX_DYNAMIC_SUMMARY_ROWS + 1,
+                **identity_kwargs,
+            )
+            if len(rows) <= self.MAX_DYNAMIC_SUMMARY_ROWS:
+                payload.update(
+                    BacktestEngine.compute_trade_cash_metrics(
+                        rows,
+                        neutral_band_pct=float(getattr(config, "backtest_neutral_band_pct", 2.0)),
+                    )
+                )
+        return payload
 
     def get_global_summary(self, *, eval_window_days: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Return overall backtest metrics normalized for Agent memory consumers."""
@@ -1169,6 +1187,7 @@ class BacktestService:
             code=code,
             eval_window_days=summary_window_days,
             engine_version=engine_version,
+            neutral_band_pct=float(getattr(get_config(), "backtest_neutral_band_pct", 2.0)),
         )
         diagnostics = summary.get("diagnostics")
         if not isinstance(diagnostics, dict):

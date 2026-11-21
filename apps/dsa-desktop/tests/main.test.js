@@ -1353,6 +1353,7 @@ test('createWindow startup path does not throw ReferenceError after restore resu
       isDestroyed: () => false,
       setBackgroundColor: () => undefined,
       once: () => undefined,
+      on: () => undefined,
       webContents: {
         on: () => undefined,
         setWindowOpenHandler: () => undefined,
@@ -1659,4 +1660,123 @@ test('stopBackend uses taskkill on Windows and clears after backend exit', async
     },
   ]);
   assert.equal(mainModule.__getBackendProcessForTest(), null);
+});
+
+test('buildTrayMenuTemplate reports the live scheduler and queue state', (t) => {
+  const mainModule = loadMainModule(t);
+  mainModule.__setTrayStateForTest({
+    status: 'running',
+    host: '127.0.0.1',
+    port: 8000,
+    schedulerEnabled: true,
+    nextRunAt: '2026-11-21T18:00:00',
+    processing: 1,
+    pending: 2,
+  });
+
+  const labels = mainModule.buildTrayMenuTemplate().map((item) => item.label);
+
+  assert.ok(labels.includes('打开 DSA 主界面'));
+  assert.ok(labels.includes('查看运行状态'));
+  assert.ok(labels.includes('后端服务：运行中 · 127.0.0.1:8000'));
+  assert.ok(labels.some((label) => label && label.startsWith('定时任务：已启用')));
+  assert.ok(labels.includes('任务队列：处理中 1 · 等待 2'));
+});
+
+test('buildTrayMenuTemplate reports offline and disabled scheduler states', (t) => {
+  const mainModule = loadMainModule(t);
+  mainModule.__setTrayStateForTest({
+    status: 'offline',
+    host: '127.0.0.1',
+    port: null,
+    schedulerEnabled: false,
+    nextRunAt: null,
+    processing: 0,
+    pending: 0,
+  });
+
+  const labels = mainModule.buildTrayMenuTemplate().map((item) => item.label);
+
+  assert.ok(labels.includes('后端服务：无法连接'));
+  assert.ok(labels.includes('定时任务：未启用'));
+});
+
+test('findRunningDsaBackend reuses the lowest port that answers the runtime overview', async (t) => {
+  const mainModule = loadMainModule(t, {
+    http: {
+      get: (url, onResponse) => {
+        const request = new EventEmitter();
+        const response = new EventEmitter();
+        const port = Number(new URL(url).port);
+        const isDsaBackend = port === 8001;
+        request.setTimeout = () => undefined;
+        request.destroy = () => undefined;
+        response.setEncoding = () => undefined;
+        response.resume = () => undefined;
+        response.statusCode = isDsaBackend ? 200 : 503;
+        process.nextTick(() => {
+          onResponse(response);
+          if (isDsaBackend) {
+            response.emit('data', JSON.stringify({
+              process: { pid: 123 },
+              scheduler: { enabled: true },
+            }));
+          }
+          response.emit('end');
+        });
+        return request;
+      },
+    },
+  });
+
+  const found = await mainModule.findRunningDsaBackend({ ports: [8000, 8001] });
+
+  assert.equal(found.port, 8001);
+  assert.equal(found.snapshot.process.pid, 123);
+});
+
+test('findRunningDsaBackend returns null when no DSA backend answers', async (t) => {
+  const mainModule = loadMainModule(t, {
+    http: {
+      get: (_url, onResponse) => {
+        const request = new EventEmitter();
+        const response = new EventEmitter();
+        request.setTimeout = () => undefined;
+        request.destroy = () => undefined;
+        response.setEncoding = () => undefined;
+        response.resume = () => undefined;
+        response.statusCode = 200;
+        process.nextTick(() => {
+          onResponse(response);
+          response.emit('data', 'not-json');
+          response.emit('end');
+        });
+        return request;
+      },
+    },
+  });
+
+  assert.equal(await mainModule.findRunningDsaBackend({ ports: [8000] }), null);
+});
+
+test('isUpdateCheckDisabled follows the environment override', (t) => {
+  const mainModule = loadMainModule(t);
+  const previous = process.env.DSA_DESKTOP_UPDATE_CHECK;
+
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.DSA_DESKTOP_UPDATE_CHECK;
+    } else {
+      process.env.DSA_DESKTOP_UPDATE_CHECK = previous;
+    }
+  });
+
+  delete process.env.DSA_DESKTOP_UPDATE_CHECK;
+  assert.equal(mainModule.isUpdateCheckDisabled(), false);
+
+  process.env.DSA_DESKTOP_UPDATE_CHECK = 'off';
+  assert.equal(mainModule.isUpdateCheckDisabled(), true);
+
+  process.env.DSA_DESKTOP_UPDATE_CHECK = 'on';
+  assert.equal(mainModule.isUpdateCheckDisabled(), false);
 });

@@ -25,6 +25,7 @@ from api.v1.endpoints import (
     intelligence,
     paper_trading,
     portfolio,
+    runtime,
     smart_scan,
     stocks,
     system_config,
@@ -75,6 +76,12 @@ router.include_router(
     system_config.router,
     prefix="/system",
     tags=["SystemConfig"]
+)
+
+router.include_router(
+    runtime.router,
+    prefix="/runtime",
+    tags=["Runtime"]
 )
 
 router.include_router(

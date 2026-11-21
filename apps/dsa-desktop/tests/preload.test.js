@@ -96,6 +96,56 @@ test('preload falls back to empty version when BrowserWindow does not pass one',
   assert.equal(preloadModule.readDesktopVersion(['--unrelated=1']), '');
 });
 
+test('createDesktopBridge hides update APIs when update checks are disabled', (t) => {
+  const originalLoad = Module._load;
+  const exposeInMainWorldCalls = [];
+  const ipcRenderer = {
+    invoke: () => Promise.resolve(),
+    on: () => undefined,
+    removeListener: () => undefined,
+  };
+
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === 'electron') {
+      return {
+        contextBridge: {
+          exposeInMainWorld: (...args) => {
+            exposeInMainWorldCalls.push(args);
+          },
+        },
+        ipcRenderer,
+      };
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+
+  const preloadPath = require.resolve('../preload.js');
+  delete require.cache[preloadPath];
+
+  t.after(() => {
+    Module._load = originalLoad;
+    delete require.cache[preloadPath];
+  });
+
+  const preloadModule = require('../preload.js');
+  const bridge = preloadModule.createDesktopBridge({
+    version: '3.12.0',
+    renderer: ipcRenderer,
+    updateCheckEnabled: false,
+  });
+
+  assert.equal(bridge.version, '3.12.0');
+  assert.equal(bridge.getUpdateState, undefined);
+  assert.equal(bridge.checkForUpdates, undefined);
+  assert.equal(bridge.installDownloadedUpdate, undefined);
+  assert.equal(bridge.onUpdateStateChange, undefined);
+  assert.equal(typeof bridge.openReleasePage, 'function');
+  assert.equal(typeof bridge.renderShareImage, 'function');
+  assert.equal(preloadModule.readUpdateCheckEnabled(['--dsa-desktop-update-check=0']), false);
+  assert.equal(preloadModule.readUpdateCheckEnabled(['--dsa-desktop-update-check=1']), true);
+  assert.equal(preloadModule.readUpdateCheckEnabled([]), true);
+});
+
 test('createDesktopBridge delegates update actions to ipcRenderer', async (t) => {
   const originalLoad = Module._load;
   const listeners = new Map();

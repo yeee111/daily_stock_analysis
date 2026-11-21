@@ -416,6 +416,32 @@ def test_news_block_treats_blank_as_missing_and_records_pack_metadata() -> None:
     assert available.metadata["news_result_count"] == 5
 
 
+def test_agent_news_evidence_refreshes_missing_news_block() -> None:
+    original = _artifacts(news_context="", news_result_count=None)
+    before = AnalysisContextBuilder.build(original)
+    assert before.blocks["news"].status == ContextFieldStatus.MISSING
+    assert before.data_quality.block_scores["news"] == 35
+
+    refreshed = AnalysisContextBuilder.build(
+        AnalysisContextBuilder.with_agent_news_evidence(original, 2)
+    )
+    assert refreshed.blocks["news"].status == ContextFieldStatus.AVAILABLE
+    assert refreshed.blocks["news"].source == "Agent 搜索"
+    assert refreshed.blocks["news"].metadata["news_result_count"] == 2
+    assert refreshed.blocks["news"].items["content"].source == "Agent 搜索"
+    assert refreshed.metadata["news_result_count"] == 2
+    assert refreshed.data_quality.block_scores["news"] == 100
+    assert refreshed.data_quality.overall_score == 100
+    # The pre-run artifacts that feed the LLM must stay untouched.
+    assert original.news_context == ""
+
+
+def test_agent_news_evidence_ignores_zero_count() -> None:
+    original = _artifacts(news_context="", news_result_count=None)
+    assert AnalysisContextBuilder.with_agent_news_evidence(original, 0) is original
+    assert AnalysisContextBuilder.with_agent_news_evidence(original, None) is original
+
+
 def test_data_quality_scores_fixed_blocks_and_limits_auxiliary_missing() -> None:
     pack = AnalysisContextBuilder.build(_artifacts())
 

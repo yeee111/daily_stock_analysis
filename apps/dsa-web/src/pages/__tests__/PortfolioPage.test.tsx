@@ -462,6 +462,25 @@ describe('PortfolioPage FX refresh', () => {
     expect(getRisk).toHaveBeenCalledWith({ accountId: undefined, costMethod: 'fifo', includeRealtime: false });
   });
 
+  it('refreshes live holding quotes from the positions card', async () => {
+    render(<PortfolioPage />);
+    await waitForInitialLoad();
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新股价' }));
+
+    await waitFor(() => expect(getSnapshot).toHaveBeenLastCalledWith(
+      { accountId: undefined, costMethod: 'fifo', includeRealtime: true },
+      { timeout: 60000 },
+    ));
+    expect(await screen.findByText(/股价更新于/)).toBeInTheDocument();
+    await waitFor(() => expect(getPerformance).toHaveBeenLastCalledWith({
+      accountId: undefined,
+      asOf: undefined,
+      costMethod: 'fifo',
+      includeRealtime: true,
+    }));
+  });
+
   it('renders stale FX status with a manual refresh button', async () => {
     render(<PortfolioPage />);
 
